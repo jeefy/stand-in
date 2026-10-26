@@ -1,0 +1,95 @@
+# agentgateway v1.6.0 standalone config excerpt: one LLM route with stand-in
+# attached as an ext_proc processor. Merge the pieces into your own config;
+# names (gateway `llm`, route `llm`, backend `upstream`) are placeholders.
+#
+# Validate with:  agentgateway --validate-only -f agentgateway-route.yaml
+#
+# Do not put a literal dollar sign anywhere in this file, comments included:
+# the config loader substitutes NAME-style environment references across the
+# whole file before parsing. Write \x24 inside regex patterns instead.
+
+frontendPolicies:
+  http:
+    # Coding-agent prompts reach several MB; the 2 MiB default rejects them on
+    # LLM-parsed routes. (This does NOT raise the ext_proc `buffered` cap,
+    # which is why stand-in uses fullDuplexStreamed below.)
+    maxBufferSize: 16777216
+  accessLog:
+    # Per-request counts from stand-in's ext_proc dynamic metadata (key
+    # `standin`). Null/absent on routes without the processor and when the
+    # processor never answered (failOpen). Counts only, never values. There is
+    # no per-request restored count: agentgateway keeps only the metadata from
+    # the request-headers response, which is sent before the response exists;
+    # use the standin_restored_total metric instead.
+    #
+    # If you log to a database (accessLog.database), put the same entries
+    # under accessLog.database.add.
+    add:
+      standin.mode: 'default(extproc.standin.mode, null)'
+      standin.tokenized: 'default(extproc.standin.tokenized, null)'
+      standin.distinct: 'default(extproc.standin.distinct, null)'
+      standin.tier_a: 'default(extproc.standin.tier_a, null)'
+      standin.tier_b: 'default(extproc.standin.tier_b, null)'
+
+gateways:
+  llm:
+    port: 4000
+
+routes:
+  - name: llm
+    gateways: [llm]
+    matches:
+      - path: {pathPrefix: /v1/messages}
+      - path: {pathPrefix: /v1/chat/completions}
+      - path: {pathPrefix: /chat/completions}
+      - path: {pathPrefix: /v1/responses}
+      - path: {pathPrefix: /responses}
+    policies:
+      # stand-in: credential-shaped strings in the request body become
+      # <<secret-xxxxxxxxxxxx>> placeholders before the provider sees them and
+      # are restored in the client-facing response.
+      extProc:
+        # The Service from kubernetes.yaml. Replace <namespace>.
+        host: "stand-in.<namespace>.svc.cluster.local:9101"
+        # failOpen only covers failures before request-body bytes reach the
+        # processor (unreachable, refused). Once the body has been handed over
+        # the processor owns the exchange; stand-in itself never returns a
+        # gRPC error and degrades to pass-through instead.
+        failureMode: failOpen
+        processingOptions:
+          requestHeaderMode: send
+          responseHeaderMode: send
+          # `buffered` is capped at the 2 MiB default (ext_proc runs before the
+          # LLM route raises the limit). fullDuplexStreamed has no cap: stand-in
+          # accumulates the request itself and answers with one streamed body.
+          requestBodyMode: fullDuplexStreamed
+          responseBodyMode: fullDuplexStreamed
+          requestTrailerMode: skip
+          responseTrailerMode: skip
+        # An object, not a list. requestTimeout bounds each ext_proc message
+        # round trip, not the whole stream: a multi-minute response is fine.
+        policies:
+          http: {requestTimeout: 5s}
+    backends:
+      - ai:
+          name: upstream
+          # stand-in only sees the client-facing wire format, so the provider
+          # choice is yours. This is the shape it was developed and tested
+          # against: a `custom` provider declaring the native GitHub Copilot
+          # formats, so nothing is translated and the client's Authorization
+          # header passes through unchanged.
+          provider:
+            custom:
+              providerOverride: github-copilot
+              formats:
+                - {type: messages, path: /v1/messages}
+                - {type: completions, path: /chat/completions}
+                - {type: responses, path: /responses}
+          hostOverride: api.githubcopilot.com:443
+          policies:
+            backendTLS: {}
+            ai:
+              routes:
+                /v1/messages: messages
+                /chat/completions: completions
+                /responses: responses

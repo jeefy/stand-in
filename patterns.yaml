@@ -1,0 +1,77 @@
+# Tier A / Tier B credential patterns tokenized by stand-in.
+#
+# Tier A: vendor-prefixed tokens (unique prefixes, near-zero false positives).
+# Tier B: key material (PEM private keys, base64 key blocks, kubeconfig and
+# Secret data fields, service-account JSON). The `pattern` lists are kept
+# identical, in content and order, to the first two `- regex:` guardrail blocks
+# of the agentgateway audit config they were taken from, so a gateway audit
+# and this processor can be compared rule-for-rule. Tier C/D (contextual
+# key=value and generic password=) are deliberately not tokenized: too noisy
+# to rewrite silently.
+#
+# `handling` (stand-in only; not part of the gateway pattern syntax):
+#   (absent)         replace the whole match
+#   value_only       key=value style rule: replace only the value after the
+#                    first `:`/`=` (and surrounding quotes/blanks), so the
+#                    model still sees which field held a secret
+#   pem_span         extend the BEGIN header through its END footer (or, when
+#                    the footer is missing, through the following base64
+#                    lines) so the whole key is one placeholder
+#   data_block_line  never standalone: only lines inside a PEM span or
+#                    directly below a `data:` / `*-data:` / `binaryData:` key
+#                    (or below an accepted line of the same block)
+#
+# `required` / `lead` (tokenizer-only speed-up for rules without a literal
+# prefix, which Python `re` would otherwise try at every offset of a multi-MB
+# body): every match contains one of `required` and starts at most `lead`
+# characters (default 0) before it. For `(?i)` rules the literals are matched
+# case-insensitively. A wrong entry makes the tokenizer MISS secrets, so keep
+# it in sync when a pattern changes (the per-rule fixtures in
+# tests/test_tokenize.py exercise every rule).
+tier_a:
+  - pattern: 'gh[pousr]_[A-Za-z0-9]{20,}'
+  - pattern: 'github_pat_[A-Za-z0-9_]{20,}'
+  - pattern: 'sk-(?:ant-(?:admin01-|api03-)?|proj-|svcacct-|admin-|or-v1-)?[A-Za-z0-9_-]{20,}'
+  - pattern: 'AKIA[0-9A-Z]{16}'
+  - pattern: 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+  - pattern: 'xox[baprs]-[A-Za-z0-9-]{10,}'
+  - pattern: 'glpat-[A-Za-z0-9_-]{20,}'
+  - pattern: 'tskey-(?:auth|api|client|apikey)-[0-9A-Za-z_]+-[0-9A-Za-z_]+'
+  - pattern: 'AIza[0-9A-Za-z_-]{35}'
+  - pattern: 'GOCSPX-[A-Za-z0-9_-]{20,}'
+  - pattern: 'ya29\.[A-Za-z0-9_-]{30,}'
+  - pattern: '1//0[A-Za-z0-9_-]{30,}'
+  - pattern: 'gsk_[A-Za-z0-9]{40,}'
+  - pattern: '(?:hf_|api_org_)[A-Za-z0-9]{34}'
+    required: ['hf_', 'api_org_']
+  - pattern: 'npm_[A-Za-z0-9]{36}'
+  - pattern: 'pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}'
+  - pattern: 'dckr_(?:pat|oat)_[A-Za-z0-9_-]{20,}'
+  - pattern: 'ATATT3[A-Za-z0-9_=-]{100,}'
+  - pattern: '[0-9]{8,10}:AA[A-Za-z0-9_-]{33}'
+    required: [':AA']
+    lead: 10
+  - pattern: 'discord(?:app)?\.com/api/webhooks/[0-9]{15,}/[A-Za-z0-9_-]{50,}'
+  - pattern: 'hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{20,}'
+  - pattern: 'cf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}'
+  - pattern: 'AGE-SECRET-KEY-1[A-Z0-9]{50,}'
+  - pattern: '\x24argon2id\x24v=19\x24m=[0-9]+,t=[0-9]+,p=[0-9]+\x24[A-Za-z0-9+/]+\x24[A-Za-z0-9+/]+'
+  - pattern: '(?:sk|rk)_(?:live|test|prod)_[A-Za-z0-9]{16,}'
+    required: ['sk_live_', 'sk_test_', 'sk_prod_', 'rk_live_', 'rk_test_', 'rk_prod_']
+  - pattern: 'SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{30,}'
+  - pattern: 'tvly-[A-Za-z0-9_-]{20,}'
+  - pattern: 'lsv2_(?:pt|sk)_[A-Za-z0-9_-]{20,}'
+  - pattern: 'BW_?(?:CLIENT)?SECRET[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9]{28,}'
+    handling: value_only
+tier_b:
+  - pattern: '-----BEGIN[ A-Z0-9_-]{0,40}PRIVATE KEY(?: BLOCK)?-----'
+    handling: pem_span
+  - pattern: '(?m)^[ \t]*[A-Za-z0-9+/]{60,}={0,2}[ \t]*$'
+    handling: data_block_line
+  - pattern: '(?i)(?:client-key-data|client-certificate-data|certificate-authority-data|token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9+/=_.-]{40,}'
+    handling: value_only
+    required: ['client-key-data', 'client-certificate-data', 'certificate-authority-data', 'token']
+  - pattern: '\"(?:private_key_id|private_key)\"\s*:\s*\"(?:[a-f0-9]{40}|-----BEGIN)'
+    handling: value_only
+  - pattern: '\"type\"\s*:\s*\"service_account\"'
+    handling: value_only

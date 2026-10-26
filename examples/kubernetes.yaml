@@ -1,0 +1,154 @@
+# stand-in on Kubernetes: Deployment + Service + PodDisruptionBudget +
+# NetworkPolicy. Replace <namespace> (and the agentgateway / monitoring
+# selectors in the NetworkPolicy) to match your cluster.
+#
+# Rollout: start with STANDIN_MODE=shadow (matches and metrics only, the
+# original body goes upstream), compare the counts, create the salt Secret,
+# then switch to enforce. See README.md, "Deploy".
+#
+# Optional salt Secret (same value for every replica; create before enforce):
+#   kubectl -n <namespace> create secret generic stand-in \
+#     --from-literal=salt="<random string>"
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stand-in
+  namespace: <namespace>
+  labels:
+    app.kubernetes.io/name: stand-in
+spec:
+  # In the request path of every LLM call on the route: two replicas on two
+  # nodes, never both down during a rollout.
+  replicas: 2
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: stand-in
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: stand-in
+    spec:
+      automountServiceAccountToken: false
+      # A response stream rides one ext_proc gRPC stream for its whole life
+      # (long agent turns run for minutes). Keep this a little above
+      # STANDIN_SHUTDOWN_GRACE and close to the gateway's own drain window.
+      terminationGracePeriodSeconds: 620
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: stand-in
+      containers:
+        - name: stand-in
+          image: ghcr.io/jeefy/stand-in:0.1.0
+          env:
+            - name: STANDIN_MODE
+              value: shadow
+            - name: STANDIN_SHUTDOWN_GRACE
+              value: "600"
+            # Placeholder hash key; identical on every replica. Until the
+            # Secret exists the built-in default salt is used (placeholders
+            # still restore, they are just predictable).
+            - name: STANDIN_SALT
+              valueFrom:
+                secretKeyRef:
+                  name: stand-in
+                  key: salt
+                  optional: true
+          ports:
+            - name: grpc
+              containerPort: 9101
+            - name: metrics
+              containerPort: 9102
+          readinessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: grpc
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              # Request bodies of several MB are held (plus a decoded copy)
+              # while tokenizing.
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stand-in
+  namespace: <namespace>
+  labels:
+    app.kubernetes.io/name: stand-in
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: stand-in
+  ports:
+    - name: grpc
+      port: 9101
+      targetPort: grpc
+    - name: metrics
+      port: 9102
+      targetPort: metrics
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: stand-in
+  namespace: <namespace>
+  labels:
+    app.kubernetes.io/name: stand-in
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: stand-in
+---
+# gRPC only from the agentgateway pods, metrics only from the monitoring
+# namespace. Adjust both selectors to your deployment.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: stand-in-ingress
+  namespace: <namespace>
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: stand-in
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: agentgateway
+      ports:
+        - {protocol: TCP, port: 9101}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - {protocol: TCP, port: 9102}
