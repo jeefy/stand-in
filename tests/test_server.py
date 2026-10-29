@@ -691,3 +691,42 @@ def test_json_formatter_adds_traceback() -> None:
     entry = json.loads(main_mod.JsonFormatter().format(record))
     assert entry["exc"].startswith("Traceback") and "RuntimeError: synthetic" in entry["exc"]
     assert "exc_info" not in entry
+
+
+@pytest.mark.parametrize(("size", "slices"), [(1, 1), (64, 1), (65, 2), (128, 2), (129, 3)])
+def test_streamed_slice_boundaries(size: int, slices: int) -> None:
+    from standin.server import _streamed
+
+    data = bytes(range(256)) * 2
+    data = data[:size]
+    out = [
+        r.request_body.response.body_mutation.streamed_response
+        for r in _streamed(data, 64, request=True)
+    ]
+    assert len(out) == slices and b"".join(s.body for s in out) == data
+    assert all(len(s.body) <= 64 for s in out)
+    assert [s.end_of_stream for s in out] == [False] * (slices - 1) + [True]
+    held = list(_streamed(data, 64, request=False, end_of_stream=False))
+    assert not any(
+        r.response_body.response.body_mutation.streamed_response.end_of_stream for r in held
+    )
+
+
+async def test_exchange_log_carries_counts_only(caplog: pytest.LogCaptureFixture) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="standin.server")
+    reply = f"key {PH} ok"
+    await _drive(_proc(), _exchange(_request_body(), _sse_response(reply), "text/event-stream"))
+    records = [r for r in caplog.records if r.getMessage() == "exchange"]
+    assert len(records) == 1
+    rec = records[0]
+    assert (rec.levelno, rec.tokenized, rec.distinct, rec.restored) == (logging.INFO, 1, 1, 1)  # type: ignore[attr-defined]
+    for v in vars(rec).values():
+        text = str(v)
+        assert TSKEY not in text and PH not in text and "<<secret-" not in text
+
+    caplog.clear()
+    clean = json.dumps({"messages": [{"role": "user", "content": "hello"}]}).encode()
+    await _drive(_proc(), _exchange(clean, [b"{}"], "application/json"))
+    assert not [r for r in caplog.records if r.getMessage() == "exchange"]

@@ -313,3 +313,26 @@ def test_data_key_at_end_of_input(tok: Tokenizer) -> None:
     assert tok.tokenize_text("kind: Secret\ndata:").replaced == 0
     result = tok.tokenize_text("data:\n  " + B64_LINE)
     assert result.text == "data:\n  " + tok.placeholder(B64_LINE)
+
+
+def test_byte_restorer_json_escapes_even_in_plain_text_bodies() -> None:
+    value = 'p"a\\ss\nx'
+    ph = Tokenizer(salt="t").placeholder(value)
+    restorer = Restorer({ph: value})
+    out = restorer.feed(f"plain {ph} text".encode()) + restorer.flush()
+    assert out == b'plain p\\"a\\\\ss\\nx text'
+
+
+def test_partial_hold_point_property() -> None:
+    import random
+
+    from standin.tokenizer import partial_hold_point
+
+    ph = Tokenizer(salt="t").placeholder("v")
+    rng = random.Random(99)
+    alphabet = "ab<>-secrt0123456789abcdef \n"
+    for _ in range(500):
+        s = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 40))).rstrip("<")
+        assert partial_hold_point(s + ph) == len(s) + len(ph)
+        for k in range(1, len(ph)):
+            assert partial_hold_point(s + ph[:k]) == len(s), (s, k)

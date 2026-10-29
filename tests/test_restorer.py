@@ -3,11 +3,12 @@ from __future__ import annotations
 import itertools
 import json
 import random
+from typing import Any
 
 from standin_fixtures import TSKEY, fill
 
 from standin.sse import SseRestorer
-from standin.tokenizer import MAX_HOLD, PLACEHOLDER_LEN, Restorer, Tokenizer
+from standin.tokenizer import MAX_HOLD, PLACEHOLDER_LEN, PLACEHOLDER_RE, Restorer, Tokenizer
 
 TOK = Tokenizer(salt="restorer-tests")
 PH = TOK.placeholder(TSKEY)
@@ -24,7 +25,13 @@ def _run(chunks: list[bytes], mapping: dict[str, str] = MAPPING) -> tuple[bytes,
 
 
 def test_constants() -> None:
-    assert PLACEHOLDER_LEN == 23 and MAX_HOLD == 22
+    assert PLACEHOLDER_LEN == 23 and MAX_HOLD == PLACEHOLDER_LEN - 1
+    rng = random.Random(3)
+    for _ in range(200):
+        value = "".join(chr(rng.randint(1, 0x2FFF)) for _ in range(rng.randint(0, 40)))
+        ph = TOK.placeholder(value)
+        assert len(ph) == PLACEHOLDER_LEN and PLACEHOLDER_RE.fullmatch(ph)
+        assert PLACEHOLDER_RE.findall(f"x{ph}y{ph}") == [ph, ph]
 
 
 def test_split_at_every_offset_two_chunks() -> None:
@@ -103,7 +110,7 @@ def test_abandon_returns_held_and_chunk() -> None:
 
 
 def _chat_event(delta: dict, finish: str | None = None) -> bytes:
-    obj = {"id": "c1", "object": "chat.completion.chunk", "model": "m"}
+    obj: dict[str, Any] = {"id": "c1", "object": "chat.completion.chunk", "model": "m"}
     obj["choices"] = [{"index": 0, "delta": delta, "finish_reason": finish}]
     return b"data: " + json.dumps(obj).encode() + b"\n\n"
 
