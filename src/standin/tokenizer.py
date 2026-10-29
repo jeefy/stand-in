@@ -52,6 +52,7 @@ _PEM_LINES = re.compile(r"(?:(?:\r?\n|(?:\\r)?\\n)[ \t]*[A-Za-z0-9+/=]{16,})+")
 _AFTER_DATA_KEY = re.compile(r"""["']?[ \t]*:[ \t]*(?:[|>][-+0-9]*)?[ \t]*\r?$""")
 _KEY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
 _KEY_BOUNDARY = frozenset(" \t\n\r\"'{,")
+_ASCII_ALNUM = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
 _VALUE_SEP = re.compile(r"""[:=][\s"']*""")
 # One JSON string literal (unrolled loop: fast on multi-MB bodies).
 _JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"')
@@ -124,10 +125,15 @@ class Tokenizer:
                 continue
             for m in _rule_matches(rule, text, folded):
                 start, end = m.span()
+                if rule.key_boundary and start > 0 and text[start - 1] in _ASCII_ALNUM:
+                    continue
                 if rule.handling == "value_only":
-                    start, end = _value_span(text, start, end)
+                    start, end = _value_span(text, start, end, m)
                 elif rule.handling == "pem_span":
                     end = _pem_end(text, end)
+                if rule.reject and any(r.fullmatch(text, start, end) for r in rule.reject):
+                    continue
+                if rule.handling == "pem_span":
                     pem.append((start, end))
                 found.append(_Span(start, end, [(rule.tier, rule.index)]))
         for rule in line_rules:
@@ -248,7 +254,12 @@ def _encode_literal(value: str) -> str:
     return encoded
 
 
-def _value_span(text: str, start: int, end: int) -> tuple[int, int]:
+def _value_span(text: str, start: int, end: int, m: re.Match[str] | None = None) -> tuple[int, int]:
+    """The value part of a key/value match: the `value` group when the rule
+    has one (for keys that themselves contain `:` or `=`), else what follows
+    the first `:`/`=` minus quotes and blanks; the whole match if empty."""
+    if m is not None and "value" in m.re.groupindex and m.start("value") < m.end("value"):
+        return m.span("value")
     sep = _VALUE_SEP.search(text, start, end)
     if sep is None:
         return start, end

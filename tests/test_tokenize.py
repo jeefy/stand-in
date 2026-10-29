@@ -2,12 +2,23 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 
 import pytest
-from standin_fixtures import B64_LINE, PEM_BODY, PEM_KEY, POSITIVE, TSKEY, fill
+from standin_fixtures import (
+    B64_LINE,
+    EXTRA_NEGATIVE,
+    EXTRA_POSITIVE,
+    NPM_UUID,
+    PEM_BODY,
+    PEM_KEY,
+    POSITIVE,
+    TSKEY,
+    fill,
+)
 
 from standin.patterns import load_rules
-from standin.tokenizer import PLACEHOLDER_RE, Restorer, Tokenizer
+from standin.tokenizer import PLACEHOLDER_RE, Restorer, Tokenizer, _is_data_key, _value_span
 
 RULES = load_rules()
 
@@ -184,3 +195,121 @@ def test_round_trip_pem_through_json(tok: Tokenizer) -> None:
     restorer = Restorer(result.mapping)
     out = restorer.feed(echoed) + restorer.flush()
     assert json.loads(out)["choices"][0]["message"]["content"] == "key:\n" + PEM_KEY
+
+
+@pytest.mark.parametrize("case", EXTRA_POSITIVE, ids=lambda c: f"{c[0][0]}{c[0][1]}")
+def test_extra_positive(tok: Tokenizer, case: tuple[tuple[str, int], str, str]) -> None:
+    key, text, secret = case
+    result = tok.tokenize_text(text)
+    assert key in result.hits
+    assert secret not in result.text
+
+
+@pytest.mark.parametrize("case", EXTRA_NEGATIVE, ids=lambda c: f"{c[0][0]}{c[0][1]}")
+def test_extra_negative(tok: Tokenizer, case: tuple[tuple[str, int], str]) -> None:
+    key, text = case
+    result = tok.tokenize_text(f"before {text} after")
+    assert key not in result.hits
+    assert result.text == f"before {text} after"
+
+
+def test_value_group_keeps_a_key_with_a_colon(tok: Tokenizer) -> None:
+    key = "//registry.npmjs.org/:_authToken="
+    result = tok.tokenize_text(f"{key}{NPM_UUID}\n")
+    assert result.text == f"{key}{tok.placeholder(NPM_UUID)}\n"
+
+
+def test_reject_and_key_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        "tier_a:\n"
+        "  - pattern: 'secret=[a-z0-9]{8,}'\n"
+        "    handling: value_only\n"
+        "    reject: ['0+', 'deadbeef[0-9]*']\n"
+        "    key_boundary: true\n"
+    )
+    tok = Tokenizer(rules=load_rules(path), salt="s", cache_entries=0)
+    for text in ("secret=abcdefgh", "my-secret=abcdefgh", '{"x":"secret=abcdefgh'):
+        result = tok.tokenize_text(text)
+        assert result.text == text.replace("abcdefgh", tok.placeholder("abcdefgh")), text
+    for text in ("secret=00000000", "secret=deadbeef42", "mysecret=abcdefgh", "My0secret=abcdefgh"):
+        assert tok.tokenize_text(text).replaced == 0, text
+
+
+def test_cache_evicts_oldest_entries() -> None:
+    tok = Tokenizer(salt="c", cache_entries=2)
+    literals = [fill(600, f"lorem {i} ") for i in range(3)]
+    tok.tokenize_json(json.dumps({"m": literals}).encode())
+    assert len(tok._cache) == 2
+    tok.tokenize_json(json.dumps({"m": literals[2]}).encode())
+    assert tok.cache_hits == 1
+    tok.tokenize_json(json.dumps({"m": literals[0]}).encode())
+    assert tok.cache_hits == 1 and len(tok._cache) == 2
+
+
+def test_cached_clean_literal_is_returned_unchanged() -> None:
+    tok = Tokenizer(salt="c", cache_entries=10)
+    body = json.dumps({"content": fill(700, "lorem ipsum ")}).encode()
+    first = tok.tokenize_json(body)
+    second = tok.tokenize_json(body)
+    assert tok.cache_hits == 1
+    for result in (first, second):
+        assert result is not None and result.replaced == 0 and result.text.encode() == body
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("abcdef", (0, 6)),
+        ("key=", (0, 4)),
+        ('key: ""', (0, 7)),
+        ("key: 'v' ", (6, 7)),
+        ("a:b=c", (2, 5)),
+    ],
+)
+def test_value_span_edges(text: str, expected: tuple[int, int]) -> None:
+    assert _value_span(text, 0, len(text)) == expected
+
+
+def test_lone_surrogate_literal_round_trips(tok: Tokenizer) -> None:
+    secret = "ghp_" + fill(24)
+    body = b'{"c": "\\udcff ' + secret.encode() + b'"}'
+    result = tok.tokenize_json(body)
+    assert result is not None and result.replaced == 1
+    out = result.text.encode("utf-8")
+    assert json.loads(out)["c"] == "\udcff " + tok.placeholder(secret)
+    assert result.mapping == {tok.placeholder(secret): secret}
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("data", True),
+        ("{data", True),
+        (",data", True),
+        ("x.data", True),
+        ("a.b.data", True),
+        ("\ttls-data", True),
+        ('"tls_data', True),
+        ("binaryData", True),
+        ("metadata", False),
+        ("nodata", False),
+        ("a+data", False),
+        ("x/data", False),
+    ],
+)
+def test_is_data_key_boundaries(text: str, expected: bool) -> None:
+    assert _is_data_key(text, text.lower(), len(text) - 4) is expected
+
+
+def test_data_keys_end_to_end(tok: Tokenizer) -> None:
+    for prefix in ("secret.data:", "a: 1,data:", '{"data":'):
+        result = tok.tokenize_text(f"{prefix}\n    {B64_LINE}\n")
+        assert result.replaced == 1 and B64_LINE not in result.text, prefix
+
+
+def test_data_key_at_end_of_input(tok: Tokenizer) -> None:
+    assert tok.tokenize_text("data:").replaced == 0
+    assert tok.tokenize_text("kind: Secret\ndata:").replaced == 0
+    result = tok.tokenize_text("data:\n  " + B64_LINE)
+    assert result.text == "data:\n  " + tok.placeholder(B64_LINE)

@@ -2,18 +2,22 @@
 #
 # Tier A: vendor-prefixed tokens (unique prefixes, near-zero false positives).
 # Tier B: key material (PEM private keys, base64 key blocks, kubeconfig and
-# Secret data fields, service-account JSON). The `pattern` lists are kept
-# identical, in content and order, to the first two `- regex:` guardrail blocks
-# of the agentgateway audit config they were taken from, so a gateway audit
-# and this processor can be compared rule-for-rule. Tier C/D (contextual
-# key=value and generic password=) are deliberately not tokenized: too noisy
-# to rewrite silently.
+# Secret data fields, service-account JSON). The `pattern` lists mirror, in
+# content and order, the first two `- regex:` guardrail blocks of the
+# agentgateway audit config, so a gateway audit and this processor can be
+# compared rule-for-rule. Rule indices are metric labels: append new rules at
+# the end of a tier (and at the same position in the gateway block), never
+# reorder or delete. Tier C/D (contextual key=value and generic password=) are
+# deliberately not tokenized: too noisy to rewrite silently. Patterns stay in
+# the Rust `regex` subset (no lookaround, no backreferences).
 #
 # `handling` (stand-in only; not part of the gateway pattern syntax):
 #   (absent)         replace the whole match
-#   value_only       key=value style rule: replace only the value after the
-#                    first `:`/`=` (and surrounding quotes/blanks), so the
-#                    model still sees which field held a secret
+#   value_only       key=value style rule: replace only the value, so the
+#                    model still sees which field held a secret. The value is
+#                    the `(?P<value>...)` group when the pattern has one (use
+#                    it when the key itself contains `:` or `=`), else what
+#                    follows the first `:`/`=` (minus quotes/blanks)
 #   pem_span         extend the BEGIN header through its END footer (or, when
 #                    the footer is missing, through the following base64
 #                    lines) so the whole key is one placeholder
@@ -21,17 +25,27 @@
 #                    directly below a `data:` / `*-data:` / `binaryData:` key
 #                    (or below an accepted line of the same block)
 #
-# `required` / `lead` (tokenizer-only speed-up for rules without a literal
-# prefix, which Python `re` would otherwise try at every offset of a multi-MB
-# body): every match contains one of `required` and starts at most `lead`
-# characters (default 0) before it. For `(?i)` rules the literals are matched
-# case-insensitively. A wrong entry makes the tokenizer MISS secrets, so keep
-# it in sync when a pattern changes (the per-rule fixtures in
-# tests/test_tokenize.py exercise every rule).
+# `reject` (stand-in only): list of regexes fullmatched against the value that
+# would be replaced (after value_only extraction); a hit drops the match. This
+# stands in for the negative lookahead the Rust subset lacks.
+# `key_boundary: true` (stand-in only): drop matches that start right after an
+# ASCII letter or digit (a left word boundary on the key).
+#
+# Prefilter (tokenizer-only speed-up; Python `re` would otherwise try the rule
+# at every offset of a multi-MB body): the loader derives the literal prefix(es)
+# every match starts with from the pattern itself (leading literals, escaped
+# punctuation, `(?:a|b)` groups, small character classes, optional parts; at
+# most 16 literals of 3+ characters). Rules whose pattern does not start with
+# such a prefix run unfiltered unless they set `required` / `lead` by hand:
+# every match contains one of `required` and starts at most `lead` characters
+# (default 0) before it. Explicit entries override the derived ones (`required:
+# []` disables the prefilter). For `(?i)` rules the literals are matched
+# case-insensitively. A wrong explicit entry makes the tokenizer MISS secrets
+# (tests/test_patterns.py checks every rule against plain `finditer`).
 tier_a:
   - pattern: 'gh[pousr]_[A-Za-z0-9]{20,}'
   - pattern: 'github_pat_[A-Za-z0-9_]{20,}'
-  - pattern: 'sk-(?:ant-(?:admin01-|api03-)?|proj-|svcacct-|admin-|or-v1-)?[A-Za-z0-9_-]{20,}'
+  - pattern: 'sk-(?:ant-(?:admin01-|api03-|oat01-)?|proj-|svcacct-|admin-|or-v1-)?[A-Za-z0-9_-]{20,}'
   - pattern: 'AKIA[0-9A-Z]{16}'
   - pattern: 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
   - pattern: 'xox[baprs]-[A-Za-z0-9-]{10,}'
@@ -43,7 +57,6 @@ tier_a:
   - pattern: '1//0[A-Za-z0-9_-]{30,}'
   - pattern: 'gsk_[A-Za-z0-9]{40,}'
   - pattern: '(?:hf_|api_org_)[A-Za-z0-9]{34}'
-    required: ['hf_', 'api_org_']
   - pattern: 'npm_[A-Za-z0-9]{36}'
   - pattern: 'pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}'
   - pattern: 'dckr_(?:pat|oat)_[A-Za-z0-9_-]{20,}'
@@ -57,12 +70,22 @@ tier_a:
   - pattern: 'AGE-SECRET-KEY-1[A-Z0-9]{50,}'
   - pattern: '\x24argon2id\x24v=19\x24m=[0-9]+,t=[0-9]+,p=[0-9]+\x24[A-Za-z0-9+/]+\x24[A-Za-z0-9+/]+'
   - pattern: '(?:sk|rk)_(?:live|test|prod)_[A-Za-z0-9]{16,}'
-    required: ['sk_live_', 'sk_test_', 'sk_prod_', 'rk_live_', 'rk_test_', 'rk_prod_']
   - pattern: 'SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{30,}'
   - pattern: 'tvly-[A-Za-z0-9_-]{20,}'
   - pattern: 'lsv2_(?:pt|sk)_[A-Za-z0-9_-]{20,}'
   - pattern: 'BW_?(?:CLIENT)?SECRET[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9]{28,}'
     handling: value_only
+  - pattern: 'ASIA[0-9A-Z]{16}'
+  - pattern: 'whsec_[A-Za-z0-9]{32,}'
+  - pattern: 'xapp-[0-9]-[A-Za-z0-9]+-[0-9]+-[a-f0-9]{64}'
+  - pattern: 'hv[sb]\.[A-Za-z0-9_-]{24,}'
+  - pattern: 'gl(?:rt|cbt)-[A-Za-z0-9_-]{20,}'
+  - pattern: '//registry\.npmjs\.org/:_authToken=(?P<value>[0-9a-f-]{36})'
+    handling: value_only
+  - pattern: 'dapi[a-f0-9]{32}'
+  - pattern: 'do[por]_v1_[a-f0-9]{64}'
+  - pattern: 'sbp_[a-f0-9]{40}'
+  - pattern: 'pscale_tkn_[A-Za-z0-9_.-]{32,}'
 tier_b:
   - pattern: '-----BEGIN[ A-Z0-9_-]{0,40}PRIVATE KEY(?: BLOCK)?-----'
     handling: pem_span
@@ -70,7 +93,8 @@ tier_b:
     handling: data_block_line
   - pattern: '(?i)(?:client-key-data|client-certificate-data|certificate-authority-data|token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9+/=_.-]{40,}'
     handling: value_only
-    required: ['client-key-data', 'client-certificate-data', 'certificate-authority-data', 'token']
+    # git SHA-1 / SHA-256 digests and SRI hashes are not credentials
+    reject: ['[0-9a-f]{40}', '[0-9a-f]{64}', 'sha(?:256|384|512)-[A-Za-z0-9+/=]+']
   - pattern: '\"(?:private_key_id|private_key)\"\s*:\s*\"(?:[a-f0-9]{40}|-----BEGIN)'
     handling: value_only
   - pattern: '\"type\"\s*:\s*\"service_account\"'
