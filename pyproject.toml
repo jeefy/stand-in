@@ -32,8 +32,10 @@ standin = "standin.main:main"
 
 [dependency-groups]
 dev = [
+    "pyright>=1.1.390",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
     "ruff>=0.8",
 ]
 
@@ -73,3 +75,20 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.pyright]
+include = ["src", "tests"]
+# Generated protobuf stubs; imports still resolve through their .pyi files.
+exclude = ["src/standin/_proto"]
+pythonVersion = "3.12"
+typeCheckingMode = "standard"
+# yaml resolves to pyright's bundled types-PyYAML stubs.
+reportMissingModuleSource = false
+
+[tool.coverage.run]
+source = ["standin"]
+omit = ["src/standin/_proto/*"]
+
+[tool.coverage.report]
+fail_under = 85
+show_missing = true

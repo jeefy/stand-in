@@ -6,7 +6,8 @@
 # original body goes upstream), compare the counts, create the salt Secret,
 # then switch to enforce. See README.md, "Deploy".
 #
-# Optional salt Secret (same value for every replica; create before enforce):
+# Salt Secret (same value for every replica). Optional in shadow; enforce
+# refuses to start without it (exit 2) unless STANDIN_ALLOW_DEFAULT_SALT=true:
 #   kubectl -n <namespace> create secret generic stand-in \
 #     --from-literal=salt="<random string>"
 apiVersion: apps/v1
@@ -33,9 +34,12 @@ spec:
     spec:
       automountServiceAccountToken: false
       # A response stream rides one ext_proc gRPC stream for its whole life
-      # (long agent turns run for minutes). Keep this a little above
-      # STANDIN_SHUTDOWN_GRACE and close to the gateway's own drain window.
-      terminationGracePeriodSeconds: 620
+      # (long agent turns run for minutes). On SIGTERM stand-in reports
+      # NOT_SERVING and keeps accepting streams for STANDIN_DRAIN_SECONDS,
+      # then stops taking new ones and gives in-flight streams
+      # STANDIN_SHUTDOWN_GRACE. No preStop hook needed:
+      #   10 (drain) + 600 (grace) + 30 (slack) = 640
+      terminationGracePeriodSeconds: 640
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -55,30 +59,39 @@ spec:
           env:
             - name: STANDIN_MODE
               value: shadow
+            - name: STANDIN_DRAIN_SECONDS
+              value: "10"
             - name: STANDIN_SHUTDOWN_GRACE
               value: "600"
             # Placeholder hash key; identical on every replica. Until the
-            # Secret exists the built-in default salt is used (placeholders
-            # still restore, they are just predictable).
+            # Secret exists shadow uses the built-in default salt; enforce
+            # exits instead. `optional: true` only keeps shadow starting
+            # before the Secret exists.
             - name: STANDIN_SALT
               valueFrom:
                 secretKeyRef:
                   name: stand-in
                   key: salt
                   optional: true
+            # Lab only: run enforce on the built-in (public) salt.
+            # - name: STANDIN_ALLOW_DEFAULT_SALT
+            #   value: "true"
           ports:
             - name: grpc
               containerPort: 9101
             - name: metrics
               containerPort: 9102
+          # gRPC health (service ""): NOT_SERVING from SIGTERM on, so the
+          # readiness probe and the endpoint controller agree during the drain.
+          # The kubelet stops liveness probes once the Pod is terminating.
           readinessProbe:
-            tcpSocket:
-              port: grpc
-            initialDelaySeconds: 2
-            periodSeconds: 10
+            grpc:
+              port: 9101
+            periodSeconds: 5
+            failureThreshold: 2
           livenessProbe:
-            tcpSocket:
-              port: grpc
+            grpc:
+              port: 9101
             initialDelaySeconds: 10
             periodSeconds: 30
           securityContext:
@@ -92,8 +105,10 @@ spec:
               memory: 128Mi
             limits:
               # Request bodies of several MB are held (plus a decoded copy)
-              # while tokenizing.
-              memory: 512Mi
+              # while tokenizing; bodies of 256 KiB and more are copied to the
+              # tokenize worker process (STANDIN_TOKENIZE_WORKERS, ~60Mi idle
+              # each). STANDIN_MAX_BODY_BYTES (32 MiB) bounds the buffer.
+              memory: 768Mi
 ---
 apiVersion: v1
 kind: Service
