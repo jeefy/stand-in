@@ -4,6 +4,55 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Request body cap: bodies over `STANDIN_MAX_BODY_BYTES` (32 MiB default)
+  pass through unredacted, counted as `outcome="oversize"`.
+- Worker-pool tokenizing: bodies of `STANDIN_TOKENIZE_OFFLOAD_BYTES` or more
+  are scanned in a spawned worker process (`STANDIN_TOKENIZE_WORKERS`).
+- Drain-before-stop on SIGTERM (`STANDIN_DRAIN_SECONDS`): gRPC health goes
+  `NOT_SERVING` via the standard grpc health servicer while new streams are
+  still accepted, then GOAWAY and `STANDIN_SHUTDOWN_GRACE`.
+- gRPC keepalive options matching agentgateway's ping behaviour, and
+  `STANDIN_MAX_CONCURRENT_STREAMS` cap on concurrent gRPC calls.
+- `STANDIN_ALLOW_DEFAULT_SALT`; enforce without `STANDIN_SALT` now fails fast
+  (exit 2).
+- Metrics: `standin_active_streams`, `standin_cache_hits_total`, new
+  `outcome="oversize"`, new phases `tokenize_pool` and `response_abandon`.
+- Structured JSON restorer for non-streamed `application/json` responses:
+  buffered to end of stream, restored per string with correct escaping.
+- Ten new Tier A rules (AWS STS, Stripe webhook secrets, Slack app-level,
+  HashiCorp Vault, GitLab runner/CI, npm legacy `_authToken`, Databricks,
+  DigitalOcean, Supabase, PlanetScale) and `oat01` in the Anthropic rule
+  (39 Tier A rules total).
+- Derived prefilters: literal prefixes are extracted from each pattern
+  automatically; explicit `required`/`lead` only needed when a pattern does
+  not start with literal text (`required: []` disables).
+- Pattern modifiers: `reject` (regexes fullmatched against the would-be
+  value), `key_boundary`, and `(?P<value>...)` support for `value_only`.
+- CI: pyright, coverage, Python 3.13 matrix, pinned actions, SBOM/provenance
+  on image builds, PyPI trusted publishing, dependabot, multi-stage
+  digest-pinned image, e2e twin job.
+- `scripts/twin.sh` docker support via `CONTAINER_RUNTIME`.
+
+### Changed
+
+- Empty `STANDIN_SALT` now means the built-in default salt (same as unset);
+  enforce refuses it.
+- Invalid settings (bad integer, float, boolean, or mode) exit with code 2 at
+  startup.
+- Kubernetes example uses grpc readiness/liveness probes (no preStop hook),
+  768Mi memory request, and `terminationGracePeriodSeconds: 640`
+  (10 drain + 600 grace + 30 slack).
+
+### Fixed
+
+- Tool-call `arguments` in non-streamed JSON responses get placeholder values
+  escaped the right number of times (JSON inside a JSON string), instead of
+  one level short.
+
 ## [0.1.0] - 2026-10-25
 
 First standalone release, extracted from the private homelab repository where
