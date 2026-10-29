@@ -14,7 +14,8 @@ processingOptions; both body legs are fullDuplexStreamed).
   bounded; outcome ``oversize``. Like a non-JSON body, it goes upstream
   unredacted.
 - Response body: every chunk is answered with the restored bytes so far; the
-  end_of_stream chunk also carries the restorer's held tail. The final
+  end_of_stream chunk also carries the restorer's held tail. JSON responses
+  are held whole until end_of_stream (see standin.json_restorer). The final
   end_of_stream=true response is always sent or the client hangs.
 - dynamic_metadata goes only on headers responses (agentgateway drops it on
   body responses) under ``standin``. agentgateway v1.6.0 only keeps
@@ -53,6 +54,7 @@ from standin._proto.envoy.service.ext_proc.v3 import (
 from standin._proto.envoy.service.ext_proc.v3 import (
     external_processor_pb2_grpc as pb_grpc,
 )
+from standin.json_restorer import JsonRestorer
 from standin.sse import SseRestorer
 from standin.tokenizer import Restorer, Tokenizer, TokenizeResult
 
@@ -329,8 +331,11 @@ class _Exchange:
         if values.get("content-encoding", "identity") not in ("", "identity"):
             metrics.ERRORS.labels(phase="response_encoded").inc()
             return
-        if "text/event-stream" in values.get("content-type", ""):
+        content_type = values.get("content-type", "")
+        if "text/event-stream" in content_type:
             self.restorer = SseRestorer(self.result.mapping)
+        elif _is_json(content_type):
+            self.restorer = JsonRestorer(self.result.mapping)
         else:
             self.restorer = Restorer(self.result.mapping)
 
@@ -341,9 +346,12 @@ class _Exchange:
             out += self.restorer.flush()
         if self.restorer.errors != errors_before:
             metrics.ERRORS.labels(phase="response_event").inc(self.restorer.errors - errors_before)
+        # JsonRestorer holds the whole body until end_of_stream, so for JSON
+        # responses this observes the body size so far, not a placeholder tail.
         metrics.HELD_BYTES.observe(self.restorer.held)
         self._report_restored()
-        yield _streamed_one(out, body.end_of_stream, request=False)
+        # A buffered JSON body is released at once; slice it like the request leg.
+        yield from _streamed(out, self.chunk_bytes, request=False, end_of_stream=body.end_of_stream)
 
     def fail_open_response(self, body: pb.HttpBody) -> pb.ProcessingResponse:
         """The chunk that raised, preceded by whatever the restorer still holds;
@@ -361,6 +369,11 @@ class _Exchange:
         if delta:
             metrics.RESTORED.inc(delta)
             self.restored_reported = self.restorer.restored
+
+
+def _is_json(content_type: str) -> bool:
+    media = content_type.split(";", 1)[0].strip()
+    return media == "application/json" or media.endswith("+json")
 
 
 def _streamed_one(data: bytes, end_of_stream: bool, *, request: bool) -> pb.ProcessingResponse:

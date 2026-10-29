@@ -25,12 +25,8 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from standin.tokenizer import (
-    PLACEHOLDER_RE,
-    PLACEHOLDER_RE_B,
-    json_escaped,
-    partial_hold_point,
-)
+from standin.json_restorer import PlaceholderSubstituter, dumps
+from standin.tokenizer import partial_hold_point
 
 _EVENT_END = re.compile(rb"\r?\n\r?\n")
 _CHAT_TEXT_FIELDS = ("content", "reasoning_content", "reasoning", "refusal")
@@ -46,8 +42,6 @@ _TERMINAL_TYPES = frozenset(
         "response.failed",
     }
 )
-_JSON_FIELDS = frozenset({"arguments", "partial_json"})
-
 Path = tuple[str | int, ...]
 
 
@@ -71,14 +65,11 @@ class _Held:
     path: Path
 
 
-class SseRestorer:
+class SseRestorer(PlaceholderSubstituter):
     def __init__(self, mapping: dict[str, str]) -> None:
-        self._text = dict(mapping)
-        self._json = {ph: json_escaped(v) for ph, v in mapping.items()}
-        self._bytes = {ph.encode(): json_escaped(v).encode() for ph, v in mapping.items()}
+        super().__init__(mapping)
         self._buf = b""
         self._held: dict[tuple[Any, ...], _Held] = {}
-        self.restored = 0
         self.max_held = 0
         self.errors = 0
 
@@ -120,38 +111,11 @@ class SseRestorer:
         out, self._buf = held + self._buf + chunk, b""
         return out
 
-    def _replace(self, text: str, kind: str) -> str:
-        if "<<secret-" not in text:
-            return text
-        table = self._json if kind == "json" else self._text
-
-        def sub(m: re.Match[str]) -> str:
-            value = table.get(m.group())
-            if value is None:
-                return m.group()
-            self.restored += 1
-            return value
-
-        return PLACEHOLDER_RE.sub(sub, text)
-
-    def _replace_bytes(self, data: bytes) -> bytes:
-        if b"<<secret-" not in data:
-            return data
-
-        def sub(m: re.Match[bytes]) -> bytes:
-            value = self._bytes.get(m.group())
-            if value is None:
-                return m.group()
-            self.restored += 1
-            return value
-
-        return PLACEHOLDER_RE_B.sub(sub, data)
-
     def _event(self, event: bytes) -> bytes:
         lines = event.splitlines(keepends=True)
         data_lines = [i for i, line in enumerate(lines) if line.startswith(b"data:")]
         if len(data_lines) != 1:
-            return self._replace_bytes(event)
+            return self.replace_bytes(event)
         i = data_lines[0]
         line = lines[i]
         body_end = len(line.rstrip(b"\r\n"))
@@ -165,9 +129,9 @@ class SseRestorer:
         try:
             obj = json.loads(payload)
         except ValueError:
-            return self._replace_bytes(event)
+            return self.replace_bytes(event)
         if not isinstance(obj, dict):
-            return self._replace_bytes(event)
+            return self.replace_bytes(event)
 
         event_name = next(
             (ln[6:].strip() for ln in lines if ln.startswith(b"event:")),
@@ -185,54 +149,27 @@ class SseRestorer:
             head, tail = text[:cut], text[cut:]
             if tail:
                 self._held[ch.key] = _Held(tail, ch.kind, event_name, lead, ch.template, ch.path)
-            new = self._replace(head, ch.kind)
+            new = self.replace(head, ch.kind)
             if new != original:
                 ch.container[ch.field] = new
                 changed = True
-        changed |= self._replace_others(obj, channel_ids)
+        changed |= self.replace_tree(obj, channel_ids)
 
         prefix = self._drain() if terminal else b""
         if changed:
-            lines[i] = b"data:" + lead + _dumps(obj) + line[body_end:]
+            lines[i] = b"data:" + lead + dumps(obj) + line[body_end:]
             event = b"".join(lines)
         return prefix + event
-
-    def _replace_others(self, node: dict[str, Any] | list[Any], skip: set[tuple[int, str]]) -> bool:
-        changed = False
-        items: list[tuple[Any, Any]] = (
-            list(node.items()) if isinstance(node, dict) else list(enumerate(node))
-        )
-        container: Any = node
-        for k, v in items:
-            if isinstance(v, str):
-                if isinstance(k, str) and (id(node), k) in skip:
-                    continue
-                kind = "json" if k in _JSON_FIELDS else "text"
-                new = self._replace(v, kind)
-                if new != v:
-                    container[k] = new
-                    changed = True
-            elif isinstance(v, dict | list):
-                changed |= self._replace_others(v, skip)
-        return changed
 
     def _drain(self) -> bytes:
         out: list[bytes] = []
         for held in self._held.values():
             obj = copy.deepcopy(held.template)
-            _set_path(obj, held.path, self._replace(held.text, held.kind))
+            _set_path(obj, held.path, self.replace(held.text, held.kind))
             name = b"event: " + held.event_name + b"\n" if held.event_name else b""
-            out.append(name + b"data:" + held.lead + _dumps(obj) + b"\n\n")
+            out.append(name + b"data:" + held.lead + dumps(obj) + b"\n\n")
         self._held.clear()
         return b"".join(out)
-
-
-def _dumps(obj: Any) -> bytes:
-    text = json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
-    try:
-        return text.encode("utf-8")
-    except UnicodeEncodeError:
-        return json.dumps(obj, separators=(",", ":")).encode("ascii")
 
 
 def _set_path(obj: Any, path: Path, value: str) -> None:
