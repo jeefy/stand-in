@@ -1,6 +1,10 @@
-.git
-.venv
-.ruff_cache
-.pytest_cache
+# Allowlist: send only what the Dockerfile copies.
+*
+!LICENSE
+!README.md
+!patterns.yaml
+!pyproject.toml
+!src/
+!uv.lock
 **/__pycache__
-dist
+**/*.py[cod]

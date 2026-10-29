@@ -12,17 +12,46 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
-          python-version: "3.12"
+          # Same uv as the Dockerfile; sha256 of uv-x86_64-unknown-linux-gnu.tar.gz.
+          version: "0.12.0"
+          checksum: eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9
+          python-version: ${{ matrix.python-version }}
           enable-cache: false
+      - run: uv lock --check
       - run: uv sync --locked
       - run: uv run ruff check .
-      - run: uv run pytest -q
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - run: uv run pytest -q --cov --cov-report=term-missing
+
+  image:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          push: false
+          load: true
+          tags: stand-in:ci
+      - name: Smoke test
+        run: |
+          docker run --rm --read-only stand-in:ci python -c "import standin.server, standin.sse"
+          docker run --rm --read-only stand-in:ci python -c "import standin.patterns as p; print(p.default_patterns_path())"
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -32,36 +61,62 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6.8.0
         with:
+          version: "0.12.0"
+          checksum: eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9
           python-version: "3.12"
           enable-cache: false
       - name: Build sdist and wheel
         run: uv build
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: dist
           path: dist/
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+          if-no-files-found: error
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
         with:
           images: ghcr.io/jeefy/stand-in
           # v0.1.0 -> ghcr.io/jeefy/stand-in:0.1.0 and :0.1
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           push: true
+          provenance: true
+          sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # PyPI trusted publishing (OIDC, no API token). Before the first v* tag, add a
+  # trusted publisher in the PyPI project settings (Publishing; a "pending
+  # publisher" if the project does not exist on PyPI yet): owner jeefy,
+  # repository stand-in, workflow ci.yaml, environment pypi. Until then PyPI
+  # rejects the upload.
+  pypi:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, release]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      # Publish the sdist and wheel built by the release job, so no build code
+      # runs in the job that can mint the OIDC token.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
