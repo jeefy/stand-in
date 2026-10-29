@@ -99,3 +99,8 @@ tier_b:
     handling: value_only
   - pattern: '\"type\"\s*:\s*\"service_account\"'
     handling: value_only
+  # API-key request headers (curl -H, HTTP dumps, client configs). The header
+  # name is the credential signal, so unlike the `token:` rule above there is no
+  # hex reject: a 64-hex x-api-key went upstream raw on 2026-10-28.
+  - pattern: '(?i)(?:x-api-key|x-plex-token|x-nsone-key|x-gitlab-token|private-token|x-vault-token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
+    handling: value_only

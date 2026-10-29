@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Tier B rule 5: API-key request headers (`x-api-key`, `x-plex-token`,
+  `x-nsone-key`, `x-gitlab-token`, `private-token`, `x-vault-token`), value
+  only, 16+ chars. Hex values are not rejected: the header name is the signal.
+
 ## [0.2.0] - 2026-10-28
 
 ### Added

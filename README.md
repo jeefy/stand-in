@@ -79,7 +79,7 @@ metric labels; never reorder or delete):
 | Tier | Contents |
 | --- | --- |
 | A | 39 vendor-prefixed tokens (GitHub, OpenAI, Anthropic, AWS access keys and STS, JWT, Slack bot/user and app-level, GitLab PAT and runner/CI, Tailscale, Google, Groq, Hugging Face, npm and npm legacy `_authToken`, PyPI, Docker, Atlassian, Telegram, webhooks, Cloudflare, age, argon2id, Stripe keys and webhook secrets, SendGrid, Tavily, LangSmith, Bitwarden, HashiCorp Vault, Databricks, DigitalOcean, Supabase, PlanetScale) |
-| B | 5 key-material rules: PEM private keys, base64 key blocks, kubeconfig/Secret `*-data` fields, service-account JSON |
+| B | 6 key-material rules: PEM private keys, base64 key blocks, kubeconfig/Secret `*-data` fields, service-account JSON, API-key request headers (`x-api-key`, `x-gitlab-token`, `private-token`, ...) |
 
 Contextual `key=value` and generic `password=` rules are too noisy to rewrite
 and stay audit-only in the gateway. Handling modifiers: `value_only` replaces

@@ -98,6 +98,7 @@ POSITIVE: dict[tuple[str, int], tuple[str, str, str]] = {
     ),
     ("b", 3): ('"private_key_id": "' + "0f" * 20 + '"', "0f" * 20, '"private_key_id": "x"'),
     ("b", 4): ('"type": "service_account"', "service_account", '"type": "user"'),
+    ("b", 5): ("x-api-key: " + HEX64, HEX64, "x-api-key: short"),
 }
 
 # More cases for rules with several prefixes or a value filter:
@@ -114,6 +115,13 @@ EXTRA_POSITIVE: list[tuple[tuple[str, int], str, str]] = [
     ),
     (("b", 2), '"accessToken": "' + fill(48, "Zm9v") + '"', fill(48, "Zm9v")),
     (("b", 2), "token: " + HEX40 + "x" + fill(8, "Zm9v"), HEX40),
+    (("b", 5), '"X-Api-Key": "' + fill(32) + '"', fill(32)),
+    (
+        ("b", 5),
+        "curl -H 'x-gitlab-token: " + fill(20, "FAKE_TEST-") + "' https://h",
+        fill(20, "FAKE_TEST-"),
+    ),
+    (("b", 5), "Private-Token:" + HEX40, HEX40),
 ]
 # (tier, index), text that rule must leave alone.
 EXTRA_NEGATIVE: list[tuple[tuple[str, int], str]] = [
@@ -121,4 +129,7 @@ EXTRA_NEGATIVE: list[tuple[tuple[str, int], str]] = [
     (("b", 2), "token: " + HEX40),
     (("b", 2), '"token": "sha512-' + fill(64, "Zm9v") + '=="'),
     (("b", 2), '"token": "sha256-' + fill(43, "Zm9v") + '="'),
+    (("b", 5), "x-api-key: $PATCHMON_API_KEY"),
+    (("b", 5), '"x-api-key": "<your-api-key>"'),
+    (("b", 5), "the x-api-key header carries the key"),
 ]
