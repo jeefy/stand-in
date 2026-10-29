@@ -29,9 +29,14 @@ standalone, where it ran in shadow and then enforce on every agent request.
   restored independently: OpenAI chat (`content`, `reasoning_content`,
   `refusal`, `tool_calls[].function.arguments`), Anthropic
   (`text`, `partial_json`, `thinking`), Responses API (`*.delta`). A partial
-  placeholder is held per channel and flushed before any terminal event. Plain
-  JSON uses a byte-level restorer holding at most 22 bytes. Unknown
-  placeholders pass through.
+  placeholder is held per channel and flushed before any terminal event.
+  `application/json` (and `+json`) bodies are held whole until
+  `end_of_stream`, parsed, and restored per string: tool-call `arguments`
+  (JSON inside a JSON string) get the value escaped for both levels, other
+  strings once (Anthropic `tool_use.input` is always plain text); an untouched
+  body is forwarded byte for byte. A body that does not parse, or one over
+  64 MiB, falls back to the byte-level restorer, which other content types use
+  too and which holds at most 22 bytes. Unknown placeholders pass through.
 - **Modes**: `shadow` counts and emits metadata but forwards the original body;
   `enforce` rewrites and restores. Both strip `accept-encoding` upstream.
 - **Failure**: never a gRPC error on the stream. Tokenize errors forward the
@@ -163,7 +168,7 @@ counts both. Workers need a writable `/dev/shm` (the container default).
 | `standin_matches_total` | `tier`, `pattern_index` | Rule matches in request bodies |
 | `standin_restored_total` | | Placeholders restored in responses |
 | `standin_errors_total` | `phase` | Exceptions handled by pass-through; `response_encoded` = compressed response skipped; `tokenize_pool` = worker pool broke, inline from then on |
-| `standin_held_bytes` | | Histogram of bytes held by the restorer per chunk |
+| `standin_held_bytes` | | Histogram of bytes held by the restorer per chunk; JSON responses are held whole, so their sizes land in the top buckets |
 | `standin_body_bytes` | | Histogram of request body size |
 | `standin_tokenize_seconds` | | Histogram of tokenize time per body, worker queueing included |
 | `standin_cache_hits_total` | | String literals served from the scan cache |
@@ -175,15 +180,21 @@ values.
 
 ## Local twin
 
-`uv sync && scripts/twin.sh` runs agentgateway v1.6.0 in podman with the example
-route, a stub OpenAI-compatible upstream, and stand-in from the working tree.
-`TWIN_*_PORT`, `AGW_IMAGE`, and `KEEP_TWIN_WORKDIR=1` are honoured.
+`uv sync && scripts/twin.sh` runs agentgateway v1.6.0 with the example route, a
+stub OpenAI-compatible upstream, and stand-in from the working tree. It uses
+`CONTAINER_RUNTIME` if set, otherwise podman, otherwise docker, and CI runs it
+with docker as the `e2e` job. It exits non-zero if any check fails and prints
+where it copied the logs (`TWIN_LOG_DIR` overrides). `TWIN_*_PORT`,
+`AGW_IMAGE`, and `KEEP_TWIN_WORKDIR=1` are honoured.
 
 ## Limitations
 
-- Non-streamed tool-call `arguments` (JSON inside a JSON string) get values
-  escaped one level short; only matters for values needing escaping, such as
-  PEM keys. The SSE path is correct.
+- Non-streamed JSON responses are buffered whole before they reach the client
+  (fine for non-streaming calls, which arrive at once anyway). Past 64 MiB, or
+  if the body is not valid JSON, restoration is byte-level, so tool-call
+  `arguments` there get values escaped one level short (only matters for
+  values needing escaping, such as PEM keys); invalid JSON counts as
+  `standin_errors_total{phase="response_event"}`.
 - Compressed responses pass through unrestored (`phase="response_encoded"`).
 - A placeholder the model alters is not recognized.
 - Per-rule attribution exists only in `standin_matches_total`, not per request.
