@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import socket
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+from typing import Any
 
 import grpc
 import pytest
@@ -17,7 +19,7 @@ from standin._proto.envoy.service.ext_proc.v3 import external_processor_pb2 as p
 from standin._proto.envoy.service.ext_proc.v3 import (
     external_processor_pb2_grpc as pb_grpc,
 )
-from standin.server import ExternalProcessor
+from standin.server import ExternalProcessor, make_tokenize_pool
 from standin.sse import SseRestorer
 from standin.tokenizer import Tokenizer
 
@@ -321,7 +323,8 @@ async def test_serve_health_and_graceful_stop() -> None:
     task = asyncio.create_task(main_mod.serve(ExternalProcessor(TOK), port, stop, 1.0))
     try:
         async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
-            stub = health_pb2_grpc.HealthStub(channel)
+            stub: Any = health_pb2_grpc.HealthStub(channel)
+            resp = None
             for _ in range(50):
                 try:
                     resp = await stub.Check(
@@ -330,7 +333,7 @@ async def test_serve_health_and_graceful_stop() -> None:
                     break
                 except grpc.aio.AioRpcError:
                     await asyncio.sleep(0.05)
-            assert resp.status == health_pb2.HealthCheckResponse.SERVING
+            assert resp is not None and resp.status == health_pb2.HealthCheckResponse.SERVING
     finally:
         stop.set()
         await asyncio.wait_for(task, 5)
@@ -342,3 +345,349 @@ def test_json_formatter_renders_counts_only() -> None:
     record = logging.makeLogRecord({"msg": "exchange", "levelname": "INFO", "tokenized": 2})
     entry = json.loads(main_mod.JsonFormatter().format(record))
     assert entry["msg"] == "exchange" and entry["tokenized"] == 2
+
+
+def _proc(tok: Tokenizer = TOK, **kwargs: object) -> ExternalProcessor:
+    kwargs.setdefault("mode", "enforce")
+    return ExternalProcessor(tok, **kwargs)  # type: ignore[arg-type]
+
+
+def _request_leg(responses: list[pb.ProcessingResponse]) -> tuple[bytes, list[bool]]:
+    bodies = _bodies(responses, "request_body")
+    return b"".join(b.body for b in bodies), [b.end_of_stream for b in bodies]
+
+
+async def test_oversize_body_switches_to_pass_through() -> None:
+    body = _request_body()
+    reqs = _exchange(body, [f"echo {PH}".encode()], "application/json")
+    before = _sample("standin_requests_total", mode="enforce", outcome="oversize")
+    responses, code = await _drive(_proc(max_body_bytes=50), reqs)
+    assert code == grpc.StatusCode.OK
+    kinds = [r.WhichOneof("response") for r in responses]
+    assert kinds == ["request_headers"] + ["request_body"] * 4 + [
+        "response_headers",
+        "response_body",
+    ]
+    assert _meta(responses[0])["tokenized"] == 0
+    sent, eos = _request_leg(responses)
+    assert sent == body and eos == [False, False, False, True]
+    restored = _bodies(responses, "response_body")[0].body
+    assert restored == f"echo {PH}".encode()
+    after = _sample("standin_requests_total", mode="enforce", outcome="oversize")
+    assert after - before == 1
+
+
+async def test_oversize_final_chunk_is_sliced_with_one_end_of_stream() -> None:
+    body = _request_body()
+    reqs = [
+        pb.ProcessingRequest(request_headers=pb.HttpHeaders()),
+        pb.ProcessingRequest(request_body=pb.HttpBody(body=body, end_of_stream=True)),
+    ]
+    responses, _ = await _drive(
+        _proc(max_body_bytes=10, chunk_bytes=64, defer_request_headers=False), reqs
+    )
+    assert responses[0].WhichOneof("response") == "request_headers"
+    sent, eos = _request_leg(responses)
+    assert sent == body and len(eos) > 1 and eos == [False] * (len(eos) - 1) + [True]
+
+
+async def test_body_at_cap_is_still_tokenized() -> None:
+    body = _request_body()
+    responses, _ = await _drive(
+        _proc(max_body_bytes=len(body)), _exchange(body, [b"{}"], "application/json")
+    )
+    sent, _ = _request_leg(responses)
+    assert TSKEY.encode() not in sent and PH.encode() in sent
+
+
+async def test_active_streams_gauge_returns_to_zero() -> None:
+    await _drive(_proc(), _exchange(_request_body(), [b"{}"], "application/json"))
+    aborted = [
+        pb.ProcessingRequest(request_headers=pb.HttpHeaders(end_of_stream=True)),
+        pb.ProcessingRequest(request_body=pb.HttpBody(body=b"x", end_of_stream=True)),
+    ]
+    await _drive(_proc(), aborted)
+    for _ in range(50):
+        if _sample("standin_active_streams") == 0:
+            break
+        await asyncio.sleep(0.01)
+    assert _sample("standin_active_streams") == 0
+
+
+def _cacheable_body() -> bytes:
+    doc = json.loads(_request_body())
+    doc["messages"].append({"role": "user", "content": "long context " * 60})
+    return json.dumps(doc).encode()
+
+
+async def test_cache_hits_counted() -> None:
+    tok = Tokenizer(salt="server-tests", cache_entries=100)
+    body = _cacheable_body()
+    before = _sample("standin_cache_hits_total")
+    for _ in range(2):
+        await _drive(_proc(tok), _exchange(body, [b"{}"], "application/json"))
+    assert _sample("standin_cache_hits_total") - before >= 1
+
+
+async def test_compressed_response_is_not_restored() -> None:
+    reqs = _exchange(_request_body(), [f"key {PH}".encode()], "application/json")
+    reqs[5].response_headers.headers.headers.add(key="content-encoding", raw_value=b"gzip")
+    before = _sample("standin_errors_total", phase="response_encoded")
+    responses, code = await _drive(_proc(), reqs)
+    assert code == grpc.StatusCode.OK
+    assert _bodies(responses, "response_body")[0].body == f"key {PH}".encode()
+    assert _sample("standin_errors_total", phase="response_encoded") - before == 1
+
+
+async def test_header_value_field_is_read_when_raw_value_is_empty() -> None:
+    reqs = _exchange(_request_body(), [f"key {PH}".encode()], "application/json")
+    reqs[5].response_headers.headers.headers.add(key="Content-Encoding", value="GZIP")
+    before = _sample("standin_errors_total", phase="response_encoded")
+    responses, _ = await _drive(_proc(), reqs)
+    assert _bodies(responses, "response_body")[0].body == f"key {PH}".encode()
+    assert _sample("standin_errors_total", phase="response_encoded") - before == 1
+
+    reqs = _exchange(_request_body(), [f"key {PH}".encode()], "application/json")
+    del reqs[5].response_headers.headers.headers[:]
+    reqs[5].response_headers.headers.headers.add(key="content-type", value="application/json")
+    responses, _ = await _drive(_proc(), reqs)
+    assert _bodies(responses, "response_body")[0].body == f"key {TSKEY}".encode()
+
+
+async def test_request_body_after_answered_request_aborts() -> None:
+    reqs = [
+        pb.ProcessingRequest(request_headers=pb.HttpHeaders(end_of_stream=True)),
+        pb.ProcessingRequest(request_body=pb.HttpBody(body=b"late", end_of_stream=True)),
+        pb.ProcessingRequest(response_headers=pb.HttpHeaders()),
+    ]
+    errors = _sample("standin_errors_total", phase="request_body")
+    outcome = _sample("standin_requests_total", mode="enforce", outcome="error")
+    responses, code = await _drive(_proc(), reqs)
+    assert code == grpc.StatusCode.OK
+    assert [r.WhichOneof("response") for r in responses] == ["request_headers"]
+    assert _sample("standin_errors_total", phase="request_body") - errors == 1
+    assert _sample("standin_requests_total", mode="enforce", outcome="error") - outcome == 1
+
+
+async def test_fail_open_when_abandon_also_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(self: SseRestorer, chunk: bytes) -> bytes:
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(SseRestorer, "feed", boom)
+    monkeypatch.setattr(SseRestorer, "abandon", boom)
+    chunks = [b"data: {}\n\n", b"data: [DONE]\n\n"]
+    before = _sample("standin_errors_total", phase="response_abandon")
+    responses, code = await _drive(_proc(), _exchange(_request_body(), chunks, "text/event-stream"))
+    assert code == grpc.StatusCode.OK
+    resp = _bodies(responses, "response_body")
+    assert b"".join(b.body for b in resp) == b"".join(chunks) and resp[-1].end_of_stream
+    assert _sample("standin_errors_total", phase="response_abandon") - before == 1
+
+
+async def test_enforce_clean_body_is_forwarded_without_restorer() -> None:
+    body = json.dumps({"messages": [{"role": "user", "content": "hello"}]}).encode()
+    before = _sample("standin_requests_total", mode="enforce", outcome="clean")
+    responses, _ = await _drive(_proc(), _exchange(body, [f"x {PH}".encode()], "application/json"))
+    sent, eos = _request_leg(responses)
+    assert sent == body and eos == [True]
+    assert _bodies(responses, "response_body")[0].body == f"x {PH}".encode()
+    assert _sample("standin_requests_total", mode="enforce", outcome="clean") - before == 1
+
+
+async def test_trailers_are_answered() -> None:
+    reqs = [
+        pb.ProcessingRequest(request_trailers=pb.HttpTrailers()),
+        pb.ProcessingRequest(response_trailers=pb.HttpTrailers()),
+    ]
+    responses, code = await _drive(_proc(), reqs)
+    assert code == grpc.StatusCode.OK
+    assert [r.WhichOneof("response") for r in responses] == [
+        "request_trailers",
+        "response_trailers",
+    ]
+
+
+@pytest.fixture(scope="module")
+def pool() -> Iterator[ProcessPoolExecutor]:
+    executor = make_tokenize_pool(1, salt="server-tests", cache_entries=100)
+    yield executor
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
+async def test_pool_tokenizes_large_body(pool: ProcessPoolExecutor) -> None:
+    body = _cacheable_body()
+    reply = f"Running tailscale up --authkey {PH} now."
+    tok = Tokenizer(salt="server-tests", cache_entries=0)
+    before = _sample("standin_cache_hits_total")
+    for _ in range(2):
+        responses, code = await _drive(
+            _proc(tok, pool=pool, offload_bytes=10),
+            _exchange(body, _sse_response(reply), "text/event-stream"),
+        )
+        assert code == grpc.StatusCode.OK
+        sent, _ = _request_leg(responses)
+        assert TSKEY.encode() not in sent and PH.encode() in sent
+        assert _meta(responses[0])["tokenized"] == 1
+    assert tok.cache_hits == 0
+    assert _sample("standin_cache_hits_total") - before >= 1
+
+
+async def test_pool_worker_exception_passes_through(pool: ProcessPoolExecutor) -> None:
+    body = b"[" * 100_000 + b"]" * 100_000
+    before = _sample("standin_errors_total", phase="request_body")
+    responses, code = await _drive(
+        _proc(pool=pool, offload_bytes=10), _exchange(body, [b"ok"], "application/json")
+    )
+    assert code == grpc.StatusCode.OK
+    sent, eos = _request_leg(responses)
+    assert sent == body and eos[-1]
+    assert _sample("standin_errors_total", phase="request_body") - before == 1
+
+
+async def test_broken_pool_falls_back_inline() -> None:
+    import multiprocessing
+    import os
+
+    broken = ProcessPoolExecutor(
+        1, mp_context=multiprocessing.get_context("spawn"), initializer=os._exit, initargs=(3,)
+    )
+    processor = _proc(pool=broken, offload_bytes=10)
+    before = _sample("standin_errors_total", phase="tokenize_pool")
+    try:
+        for _ in range(2):
+            responses, _ = await _drive(
+                processor, _exchange(_request_body(), [b"{}"], "application/json")
+            )
+            sent, _ = _request_leg(responses)
+            assert TSKEY.encode() not in sent and PH.encode() in sent
+    finally:
+        broken.shutdown(wait=True)
+    assert processor.pool is None
+    assert _sample("standin_errors_total", phase="tokenize_pool") - before == 1
+
+
+class _FakePool(ThreadPoolExecutor):
+    def __init__(self) -> None:
+        super().__init__(1)
+        self.shut = False
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self.shut = True
+        super().shutdown(wait, cancel_futures=cancel_futures)
+
+
+async def test_serve_reports_not_serving_while_draining() -> None:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    stop = asyncio.Event()
+    fake = _FakePool()
+    task = asyncio.create_task(
+        main_mod.serve(ExternalProcessor(TOK), port, stop, 1.0, drain=0.5, pool=fake)
+    )
+    try:
+        async with grpc.aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub: Any = health_pb2_grpc.HealthStub(channel)
+
+            async def status(service: str) -> int:
+                return (await stub.Check(health_pb2.HealthCheckRequest(service=service))).status
+
+            for _ in range(50):
+                try:
+                    assert await status("") == health_pb2.HealthCheckResponse.SERVING
+                    break
+                except grpc.aio.AioRpcError:
+                    await asyncio.sleep(0.05)
+            assert await status(main_mod.SERVICE_NAME) == health_pb2.HealthCheckResponse.SERVING
+            with pytest.raises(grpc.aio.AioRpcError) as unknown:
+                await status("nope")
+            assert unknown.value.code() == grpc.StatusCode.NOT_FOUND
+
+            stop.set()
+            for _ in range(20):
+                if await status("") == health_pb2.HealthCheckResponse.NOT_SERVING:
+                    break
+                await asyncio.sleep(0.02)
+            assert await status("") == health_pb2.HealthCheckResponse.NOT_SERVING
+            assert await status(main_mod.SERVICE_NAME) == health_pb2.HealthCheckResponse.NOT_SERVING
+            assert not task.done()
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, 5)
+    assert fake.shut
+
+
+def test_settings_defaults() -> None:
+    s = main_mod._settings_from_env({})
+    assert s == main_mod.Settings()
+    assert s.max_body_bytes == 32 << 20 and s.tokenize_workers == 1
+    assert s.offload_bytes == 262144 and s.drain == 10.0 and s.max_concurrent_streams is None
+
+
+def test_settings_overrides() -> None:
+    s = main_mod._settings_from_env(
+        {
+            "STANDIN_MODE": " Enforce ",
+            "STANDIN_SALT": "s3",
+            "STANDIN_MAX_BODY_BYTES": "0",
+            "STANDIN_TOKENIZE_WORKERS": "0",
+            "STANDIN_TOKENIZE_OFFLOAD_BYTES": "1024",
+            "STANDIN_MAX_CONCURRENT_STREAMS": "64",
+            "STANDIN_DRAIN_SECONDS": "2.5",
+            "STANDIN_SHUTDOWN_GRACE": "30",
+            "STANDIN_DEFER_REQUEST_HEADERS": "false",
+            "STANDIN_CHUNK_BYTES": "4096",
+        }
+    )
+    assert s.mode == "enforce" and s.salt == "s3"
+    assert s.max_body_bytes == 0 and s.tokenize_workers == 0 and s.offload_bytes == 1024
+    assert s.max_concurrent_streams == 64 and s.drain == 2.5 and s.grace == 30.0
+    assert not s.defer_request_headers and s.chunk_bytes == 4096
+
+
+@pytest.mark.parametrize("salt", [None, ""])
+def test_enforce_without_salt_exits(salt: str | None) -> None:
+    env = {"STANDIN_MODE": "enforce"}
+    if salt is not None:
+        env["STANDIN_SALT"] = salt
+    with pytest.raises(SystemExit) as exc:
+        main_mod._settings_from_env(env)
+    assert exc.value.code == 2
+
+
+def test_default_salt_allowed_in_shadow_or_with_override() -> None:
+    assert main_mod._settings_from_env({}).salt is None
+    s = main_mod._settings_from_env(
+        {"STANDIN_MODE": "enforce", "STANDIN_ALLOW_DEFAULT_SALT": "true"}
+    )
+    assert s.mode == "enforce" and s.salt is None
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"STANDIN_MODE": "mask"},
+        {"STANDIN_MAX_BODY_BYTES": "lots"},
+        {"STANDIN_DRAIN_SECONDS": "-1"},
+        {"STANDIN_DEFER_REQUEST_HEADERS": "maybe"},
+    ],
+)
+def test_invalid_settings_exit(env: dict[str, str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main_mod._settings_from_env(env)
+    assert exc.value.code == 2
+
+
+def test_json_formatter_adds_traceback() -> None:
+    import logging
+    import sys
+
+    try:
+        raise RuntimeError("synthetic")
+    except RuntimeError:
+        record = logging.makeLogRecord(
+            {"msg": "failed", "levelname": "ERROR", "exc_info": sys.exc_info()}
+        )
+    entry = json.loads(main_mod.JsonFormatter().format(record))
+    assert entry["exc"].startswith("Traceback") and "RuntimeError: synthetic" in entry["exc"]
+    assert "exc_info" not in entry

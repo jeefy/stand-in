@@ -55,6 +55,15 @@ routes:
         # processor (unreachable, refused). Once the body has been handed over
         # the processor owns the exchange; stand-in itself never returns a
         # gRPC error and degrades to pass-through instead.
+        #
+        # Once in enforce, prefer failClosed. With failOpen every exchange
+        # that cannot reach a processor goes upstream unredacted: a stream
+        # opened in the window between a replica's GOAWAY and the gateway's
+        # reconnect, both replicas down, a NetworkPolicy mistake, or
+        # STANDIN_MAX_CONCURRENT_STREAMS being hit. Rollouts leak that way
+        # silently. failClosed turns the same moments into a visible error
+        # the agent retries; stand-in's drain (STANDIN_DRAIN_SECONDS), gRPC
+        # readiness and maxUnavailable: 0 keep them rare.
         failureMode: failOpen
         processingOptions:
           requestHeaderMode: send

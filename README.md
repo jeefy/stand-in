@@ -91,7 +91,8 @@ file at runtime.
 [`examples/kubernetes.yaml`](examples/kubernetes.yaml): Deployment x2, Service,
 PDB, NetworkPolicy. Image `ghcr.io/jeefy/stand-in:<version>`; gRPC on 9101,
 metrics on 9102. Keep `terminationGracePeriodSeconds` above
-`STANDIN_SHUTDOWN_GRACE`; long agent turns ride one stream for minutes.
+`STANDIN_DRAIN_SECONDS + STANDIN_SHUTDOWN_GRACE`; long agent turns ride one
+stream for minutes.
 
 [`examples/agentgateway-route.yaml`](examples/agentgateway-route.yaml): the
 route policy and access-log attributes.
@@ -116,30 +117,57 @@ Rollout: deploy in `shadow` and confirm `standin_errors_total` stays 0 and
 `standin.*` access-log counts match the gateway's Tier A/B audit; create the
 salt Secret and switch to `enforce`; verify with a synthetic credential from a
 disposable agent session; then set the gateway's Tier A guardrail to `mask` as
-a backstop. Roll back by flipping `STANDIN_MODE`.
+a backstop. Roll back by flipping `STANDIN_MODE`. In `enforce` stand-in exits
+(code 2) without `STANDIN_SALT` unless `STANDIN_ALLOW_DEFAULT_SALT=true`; the
+built-in salt is public, so its placeholders are predictable.
+
+Rollouts: agentgateway keeps one HTTP/2 connection per processor, which a
+ClusterIP Service pins to one pod. On SIGTERM stand-in reports gRPC health
+`NOT_SERVING` and keeps serving for `STANDIN_DRAIN_SECONDS` while the endpoint
+is withdrawn, then sends GOAWAY and gives in-flight streams
+`STANDIN_SHUTDOWN_GRACE`; the gateway reconnects to another replica. Use the
+`grpc` readiness/liveness probes from the example (no `preStop` hook needed).
+A stream that still lands on a stopping replica, or any other unreachable
+moment, falls under `failureMode`: with `failOpen` that exchange goes upstream
+unredacted, so switch to `failClosed` once in `enforce`.
+
+Request bodies over `STANDIN_MAX_BODY_BYTES` are not buffered: the leg switches
+to pass-through and the body goes upstream unredacted, like a non-JSON body,
+counted as `outcome="oversize"`. Bodies of `STANDIN_TOKENIZE_OFFLOAD_BYTES` or
+more are tokenized in a spawned worker process so a multi-MB scan does not stall
+other streams; each worker keeps its own scan cache, so the cache-hit metric
+counts both. Workers need a writable `/dev/shm` (the container default).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `STANDIN_MODE` | `shadow` | `shadow` or `enforce` |
-| `STANDIN_SALT` | built-in | Placeholder hash key; identical on every replica, keep secret |
+| `STANDIN_SALT` | built-in | Placeholder hash key; identical on every replica, keep secret; required in `enforce` |
+| `STANDIN_ALLOW_DEFAULT_SALT` | `false` | Let `enforce` start on the built-in salt (labs only) |
 | `STANDIN_GRPC_PORT` | `9101` | ext_proc and gRPC health |
 | `STANDIN_METRICS_PORT` | `9102` | Prometheus `/metrics` |
 | `STANDIN_CHUNK_BYTES` | `1048576` | Max bytes per request-leg `StreamedBodyResponse` |
-| `STANDIN_CACHE_ENTRIES` | `50000` | Per-literal scan cache; `0` disables |
-| `STANDIN_SHUTDOWN_GRACE` | `600` | Seconds in-flight streams get after SIGTERM |
+| `STANDIN_MAX_BODY_BYTES` | `33554432` | Request bodies above this pass through unredacted (`oversize`); `0` = unlimited |
+| `STANDIN_CACHE_ENTRIES` | `50000` | Per-literal scan cache (per process); `0` disables |
+| `STANDIN_TOKENIZE_WORKERS` | `1` | Worker processes for large bodies; `0` tokenizes on the event loop |
+| `STANDIN_TOKENIZE_OFFLOAD_BYTES` | `262144` | Bodies at least this big go to a worker |
+| `STANDIN_MAX_CONCURRENT_STREAMS` | `0` | Cap on concurrent gRPC calls, health checks included; over it calls fail before any body (`failureMode` applies); `0` = unlimited |
+| `STANDIN_DRAIN_SECONDS` | `10` | After SIGTERM: health `NOT_SERVING` while still serving |
+| `STANDIN_SHUTDOWN_GRACE` | `600` | Then seconds in-flight streams get to finish |
 | `STANDIN_DEFER_REQUEST_HEADERS` | `true` | Answer request headers after the body |
 | `STANDIN_PATTERNS_FILE` | packaged | Alternative pattern file |
-| `LOG_LEVEL` | `INFO` | JSON lines on stdout |
+| `LOG_LEVEL` | `INFO` | JSON lines on stdout; `DEBUG` adds tracebacks to error lines |
 
 | Metric | Labels | Meaning |
 | --- | --- | --- |
-| `standin_requests_total` | `mode`, `outcome` | `tokenized`, `clean`, `skipped_non_json`, `no_body`, `error`, `incomplete` |
+| `standin_requests_total` | `mode`, `outcome` | `tokenized`, `clean`, `skipped_non_json`, `oversize`, `no_body`, `error`, `incomplete` |
 | `standin_matches_total` | `tier`, `pattern_index` | Rule matches in request bodies |
 | `standin_restored_total` | | Placeholders restored in responses |
-| `standin_errors_total` | `phase` | Exceptions handled by pass-through; `response_encoded` = compressed response skipped |
+| `standin_errors_total` | `phase` | Exceptions handled by pass-through; `response_encoded` = compressed response skipped; `tokenize_pool` = worker pool broke, inline from then on |
 | `standin_held_bytes` | | Histogram of bytes held by the restorer per chunk |
 | `standin_body_bytes` | | Histogram of request body size |
-| `standin_tokenize_seconds` | | Histogram of tokenize time per body |
+| `standin_tokenize_seconds` | | Histogram of tokenize time per body, worker queueing included |
+| `standin_cache_hits_total` | | String literals served from the scan cache |
+| `standin_active_streams` | | ext_proc streams currently open |
 
 Access-log attributes: `standin.mode`, `standin.tokenized`, `standin.distinct`,
 `standin.tier_a`, `standin.tier_b`. Logs and metrics carry counts only, never

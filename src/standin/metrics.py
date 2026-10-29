@@ -3,7 +3,7 @@ only; never a value, a prefix or a placeholder."""
 
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 REQUESTS = Counter(
     "standin_requests",
@@ -38,4 +38,12 @@ TOKENIZE_SECONDS = Histogram(
     "standin_tokenize_seconds",
     "Time spent tokenizing one request body",
     buckets=(0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+)
+ACTIVE = Gauge(
+    "standin_active_streams",
+    "ext_proc streams currently open",
+)
+CACHE_HITS = Counter(
+    "standin_cache_hits",
+    "String literals whose scan result came from the per-literal cache",
 )
