@@ -15,10 +15,12 @@ import hashlib
 import json
 import os
 import re
+import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 
-from standin.patterns import Rule, load_rules
+from standin.patterns import COUNT_TIERS, Rule, load_count_rules, load_rules
+from standin.turns import Scope, new_turn_strings
 
 PLACEHOLDER_PREFIX = "<<secret-"
 PLACEHOLDER_HEX_LEN = 12
@@ -56,10 +58,20 @@ _ASCII_ALNUM = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ01
 _VALUE_SEP = re.compile(r"""[:=][\s"']*""")
 # One JSON string literal (unrolled loop: fast on multi-MB bodies).
 _JSON_STRING = re.compile(r'"[^"\\]*(?:\\.[^"\\]*)*"')
-# Joins decoded string literals for one scan. No rule can match NUL, so no
-# span crosses a literal boundary; the newlines keep `(?m)^`/`$` anchored at
-# literal edges like they are for the gateway's per-message scan.
+# Joins decoded string literals for one scan. No rule matches this run (Tier
+# A/B never match NUL; the Tier D and C5 classes that do stop at the newlines),
+# so no span crosses a literal boundary; the newlines keep `(?m)^`/`$` anchored
+# at literal edges like they are for the gateway's per-message scan.
 _LITERAL_SEP = "\n\x00\n"
+# Wall-clock cap on one count_new scan. Python `re` is backtracking: a body
+# built to defeat the Tier C prefilters (a long run of `apikey`, say) can take
+# seconds where the gateway's Rust regex is linear, and the count shares the
+# request's critical path. Past the budget the count is dropped, not the body.
+COUNT_BUDGET_SECONDS = 2.0
+
+
+class CountBudgetExceeded(Exception):
+    pass
 
 
 @dataclass
@@ -85,14 +97,30 @@ class TokenizeResult:
         return {"a": counts.get("a", 0), "b": counts.get("b", 0)}
 
 
+@dataclass
+class NewCounts:
+    """Rule matches in the newest turn of a request (see standin.turns).
+    ``error`` is the exception type name when counting failed."""
+
+    scope: Scope
+    hits: list[tuple[str, int]] = field(default_factory=list)
+    error: str | None = None
+
+    def tier_counts(self) -> dict[str, int]:
+        counts = Counter(tier for tier, _ in self.hits)
+        return {tier: counts.get(tier, 0) for tier in COUNT_TIERS}
+
+
 class Tokenizer:
     def __init__(
         self,
         rules: list[Rule] | None = None,
         salt: str | None = None,
         cache_entries: int | None = None,
+        count_rules: list[Rule] | None = None,
     ) -> None:
         self.rules = rules if rules is not None else load_rules()
+        self._count_rules = count_rules
         key = (salt if salt is not None else os.environ.get(SALT_ENV, DEFAULT_SALT)).encode()
         if len(key) > hashlib.blake2b.MAX_KEY_SIZE:
             key = hashlib.blake2b(key).digest()
@@ -112,18 +140,29 @@ class Tokenizer:
         ).hexdigest()
         return f"{PLACEHOLDER_PREFIX}{digest}>>"
 
-    def find_spans(self, text: str) -> list[_Span]:
-        """Non-overlapping replacement spans; overlapping matches are unioned so
-        a secret is never partially exposed."""
+    @property
+    def count_rules(self) -> list[Rule]:
+        """Tier A-D rules for count_new, loaded on first use."""
+        if self._count_rules is None:
+            self._count_rules = load_count_rules()
+        return self._count_rules
+
+    def find_spans(
+        self, text: str, rules: list[Rule] | None = None, deadline: float | None = None
+    ) -> list[_Span]:
+        """Non-overlapping replacement spans (of ``self.rules`` unless ``rules``
+        is given); overlapping matches are unioned so a secret is never
+        partially exposed, and every rule match stays in ``hits``. Past
+        ``deadline`` (``time.monotonic()``) raises CountBudgetExceeded."""
         found: list[_Span] = []
         pem: list[tuple[int, int]] = []
         line_rules: list[Rule] = []
         folded = _Folded(text)
-        for rule in self.rules:
+        for rule in self.rules if rules is None else rules:
             if rule.handling == "data_block_line":
                 line_rules.append(rule)
                 continue
-            for m in _rule_matches(rule, text, folded):
+            for m in _rule_matches(rule, text, folded, deadline):
                 start, end = m.span()
                 if rule.key_boundary and start > 0 and text[start - 1] in _ASCII_ALNUM:
                     continue
@@ -240,6 +279,24 @@ class Tokenizer:
         out.append(raw[cursor:])
         return TokenizeResult("".join(out), mapping, hits, replaced)
 
+    def count_new(self, body: bytes, budget: float | None = COUNT_BUDGET_SECONDS) -> NewCounts:
+        """Rule matches (Tier A-D) in the newest turn of ``body``; scope
+        ``none`` when it is not UTF-8 JSON. Read-only: never touches the
+        scan cache or the body. Raises CountBudgetExceeded after ``budget``
+        seconds of scanning (None: no limit)."""
+        try:
+            doc = json.loads(body.decode("utf-8"))
+        except ValueError:
+            return NewCounts("none")
+        scope, texts = new_turn_strings(doc)
+        if not texts:
+            return NewCounts(scope)
+        hits: list[tuple[str, int]] = []
+        deadline = None if budget is None else time.monotonic() + budget
+        for span in self.find_spans(_LITERAL_SEP.join(texts), self.count_rules, deadline):
+            hits.extend(span.hits)
+        return NewCounts(scope, hits)
+
 
 def _decode_literal(literal: str, inner: str) -> str:
     return json.loads(literal) if "\\" in inner else inner
@@ -306,9 +363,14 @@ def _find_all(haystack: str, needle: str) -> list[int]:
     return out
 
 
-def _rule_matches(rule: Rule, text: str, folded: _Folded) -> list[re.Match[str]]:
+def _rule_matches(
+    rule: Rule, text: str, folded: _Folded, deadline: float | None = None
+) -> list[re.Match[str]]:
     """``rule.regex.finditer(text)``, but only tried near the rule's required
-    literals when it has any (same leftmost, non-overlapping results)."""
+    literals when it has any (same leftmost, non-overlapping results). With a
+    ``deadline``, checked before the rule and at every candidate position."""
+    if deadline is not None and time.monotonic() > deadline:
+        raise CountBudgetExceeded
     if not rule.required:
         return list(rule.regex.finditer(text))
     haystack = folded.text if rule.ignore_case else text
@@ -316,6 +378,8 @@ def _rule_matches(rule: Rule, text: str, folded: _Folded) -> list[re.Match[str]]
     out: list[re.Match[str]] = []
     last_end = 0
     for q in positions:
+        if deadline is not None and time.monotonic() > deadline:
+            raise CountBudgetExceeded
         for start in range(max(q - rule.lead, last_end), q + 1):
             m = rule.regex.match(text, start)
             if m is not None:
