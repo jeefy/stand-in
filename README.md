@@ -71,7 +71,8 @@ shadow and a `mask` backstop in enforce.
 
 ## Patterns
 
-[`patterns.yaml`](patterns.yaml) carries two tiers. Rules are appended in the
+[`patterns.yaml`](patterns.yaml) carries four tiers; A and B are tokenized,
+C and D are counted only (with `STANDIN_COUNT_NEW`). Rules are appended in the
 same order on both sides, so once the gateway is updated its audit counts and
 stand-in's shadow counts stay comparable rule for rule (rule indexes are
 metric labels; never reorder or delete):
@@ -80,9 +81,17 @@ metric labels; never reorder or delete):
 | --- | --- |
 | A | 39 vendor-prefixed tokens (GitHub, OpenAI, Anthropic, AWS access keys and STS, JWT, Slack bot/user and app-level, GitLab PAT and runner/CI, Tailscale, Google, Groq, Hugging Face, npm and npm legacy `_authToken`, PyPI, Docker, Atlassian, Telegram, webhooks, Cloudflare, age, argon2id, Stripe keys and webhook secrets, SendGrid, Tavily, LangSmith, Bitwarden, HashiCorp Vault, Databricks, DigitalOcean, Supabase, PlanetScale) |
 | B | 6 key-material rules: PEM private keys, base64 key blocks, kubeconfig/Secret `*-data` fields, service-account JSON, API-key request headers (`x-api-key`, `x-gitlab-token`, `private-token`, ...) |
+| C | 7 contextual `key=value` rules, count-only: generic `*_key`/`*_token`/`*_secret`, homelab service keys, Gitea/Forgejo tokens, API-key headers, `Authorization` values, credentialed URLs, AWS-style secret keys |
+| D | 1 generic `password=` rule, count-only |
 
-Contextual `key=value` and generic `password=` rules are too noisy to rewrite
-and stay audit-only in the gateway. Handling modifiers: `value_only` replaces
+Contextual `key=value` and generic `password=` rules (C, D) are too noisy to
+rewrite. With `STANDIN_COUNT_NEW=true`, stand-in counts matches of every tier
+in the newest turn of each request only (the messages after the last
+assistant message or Responses `reasoning`/`*_call` item; the whole body on a
+first turn; only `input` with `previous_response_id`), skipping image and
+base64 payloads. The count never changes the body, has a 2 s budget, and
+failures land in `standin_errors_total{phase="count_new"}`. C/D rules may not
+set `handling`, `reject` or `key_boundary`. Handling modifiers: `value_only` replaces
 only the value, honouring a `(?P<value>...)` group when the pattern has one
 (use it when the key itself contains `:` or `=`), else what follows the first
 `:`/`=`; `pem_span` makes a `BEGIN...END PRIVATE KEY` block one placeholder;
@@ -100,7 +109,7 @@ Prefilters are derived automatically from each pattern's literal prefix
 prefix runs unfiltered unless it sets `required`/`lead` by hand; explicit
 entries override the derived ones, and `required: []` disables the prefilter.
 
-To extend, append under `tier_a`/`tier_b` (`pattern` is Python `re`; stay in
+To extend, append under `tier_a`/`tier_b` (or `tier_c`/`tier_d` for count-only) (`pattern` is Python `re`; stay in
 the Rust-`regex` subset if you mirror it in the gateway), optionally `handling`
 and `required`/`lead` prefilter hints, and add synthetic positive and negative
 fixtures to `tests/standin_fixtures.py` (both are required per rule).
@@ -174,6 +183,7 @@ counts both. Workers need a writable `/dev/shm` (the container default).
 | `STANDIN_DRAIN_SECONDS` | `10` | After SIGTERM: health `NOT_SERVING` while still serving |
 | `STANDIN_SHUTDOWN_GRACE` | `600` | Then seconds in-flight streams get to finish |
 | `STANDIN_DEFER_REQUEST_HEADERS` | `true` | Answer request headers after the body |
+| `STANDIN_COUNT_NEW` | `false` | Also count Tier A-D matches in the newest turn (metrics and metadata only) |
 | `STANDIN_PATTERNS_FILE` | packaged | Alternative pattern file |
 | `LOG_LEVEL` | `INFO` | JSON lines on stdout; `DEBUG` adds tracebacks to error lines |
 
@@ -181,6 +191,8 @@ counts both. Workers need a writable `/dev/shm` (the container default).
 | --- | --- | --- |
 | `standin_requests_total` | `mode`, `outcome` | `tokenized`, `clean`, `skipped_non_json`, `oversize`, `no_body`, `error`, `incomplete` |
 | `standin_matches_total` | `tier`, `pattern_index` | Rule matches in request bodies |
+| `standin_new_matches_total` | `tier`, `pattern_index` | Tier A-D matches in the newest turn (`STANDIN_COUNT_NEW`) |
+| `standin_turn_scope_total` | `scope` | What the newest-turn count scanned: `tail`, `first`, `input_only`, `none` (not JSON) |
 | `standin_restored_total` | | Placeholders restored in responses |
 | `standin_errors_total` | `phase` | Exceptions handled by pass-through; `response_encoded` = compressed response skipped; `tokenize_pool` = worker pool broke, inline from then on; `response_abandon` = restorer gave up, chunk passed through |
 | `standin_held_bytes` | | Histogram of bytes held by the restorer per chunk; JSON responses are held whole, so their sizes land in the top buckets |
@@ -190,7 +202,9 @@ counts both. Workers need a writable `/dev/shm` (the container default).
 | `standin_active_streams` | | ext_proc streams currently open |
 
 Access-log attributes: `standin.mode`, `standin.tokenized`, `standin.distinct`,
-`standin.tier_a`, `standin.tier_b`. Logs and metrics carry counts only, never
+`standin.tier_a`, `standin.tier_b`, and with `STANDIN_COUNT_NEW`
+`standin.new_a` to `standin.new_d` (absent on oversize bodies and count
+errors). Logs and metrics carry counts only, never
 values.
 
 ## Local twin

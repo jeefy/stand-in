@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `STANDIN_COUNT_NEW` (default `false`): count Tier A-D matches in the newest
+  turn of each request only (Anthropic Messages, OpenAI Chat, Responses with
+  and without `previous_response_id`), as `standin_new_matches_total`,
+  `standin_turn_scope_total` and `standin.new_a`..`new_d` metadata. Bodies
+  are never changed by the count; it has a 2 s budget and failures count as
+  `standin_errors_total{phase="count_new"}`.
+- Tier C (7 contextual `key=value` rules) and Tier D (generic `password=`)
+  in `patterns.yaml`, count-only, copied from the gateway audit rules.
+
+### Changed
+
+- `load_raw()` returns all four tiers; `load_rules()` still returns A and B.
+- The tokenizer is built before the worker pool so a bad pattern fails fast.
+
 ## [0.3.0] - 2026-10-29
 
 ### Added
