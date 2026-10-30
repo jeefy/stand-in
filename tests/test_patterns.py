@@ -10,27 +10,39 @@ import string
 from pathlib import Path
 
 import pytest
-from standin_fixtures import EXTRA_NEGATIVE, EXTRA_POSITIVE, POSITIVE, fill
+from standin_fixtures import (
+    COUNT_ONLY,
+    COUNT_ONLY_EXTRA,
+    EXTRA_NEGATIVE,
+    EXTRA_POSITIVE,
+    POSITIVE,
+    fill,
+)
 
 import standin.patterns as patterns_mod
 from standin.patterns import (
+    COUNT_TIERS,
     PATTERNS_ENV,
+    TIERS,
     Rule,
     default_patterns_path,
     derive_required,
+    load_count_rules,
     load_raw,
     load_rules,
 )
 from standin.tokenizer import Tokenizer, _Folded, _rule_matches
 
 RULES = load_rules()
+COUNT_RULES = load_count_rules()
+COUNT_ONLY_RULES = [r for r in COUNT_RULES if r.tier not in TIERS]
 
 
 def test_every_pattern_compiles() -> None:
     for tier, entries in load_raw().items():
         for index, entry in enumerate(entries):
             re.compile(entry["pattern"])
-            assert (tier, index) in {(r.tier, r.index) for r in RULES}
+            assert (tier, index) in {(r.tier, r.index) for r in COUNT_RULES}
 
 
 @pytest.mark.parametrize("rule", RULES, ids=lambda r: f"{r.tier}{r.index}")
@@ -43,10 +55,45 @@ def test_every_pattern_has_a_positive_fixture(rule: Rule) -> None:
 def test_tier_sizes_follow_the_shipped_file(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(PATTERNS_ENV, raising=False)
     raw = load_raw(default_patterns_path())
+    assert tuple(raw) == COUNT_TIERS
     shipped = {(tier, i) for tier, entries in raw.items() for i in range(len(entries))}
-    assert {(r.tier, r.index) for r in RULES} == shipped
-    assert set(POSITIVE) == shipped
+    tokenized = {k for k in shipped if k[0] in TIERS}
+    assert {(r.tier, r.index) for r in RULES} == tokenized
+    assert {(r.tier, r.index) for r in COUNT_RULES} == shipped
+    assert set(POSITIVE) == tokenized
+    assert set(COUNT_ONLY) == shipped - tokenized
     assert all(len(raw[t]) for t in raw)
+    assert (len(raw["c"]), len(raw["d"])) == (7, 1)
+
+
+def test_count_rules_start_with_the_tokenized_rules() -> None:
+    head = COUNT_RULES[: len(RULES)]
+    assert [(r.tier, r.index, r.pattern) for r in head] == [
+        (r.tier, r.index, r.pattern) for r in RULES
+    ]
+
+
+@pytest.mark.parametrize("rule", COUNT_ONLY_RULES, ids=lambda r: f"{r.tier}{r.index}")
+def test_count_only_fixtures(rule: Rule) -> None:
+    pos, neg = COUNT_ONLY[(rule.tier, rule.index)]
+    for text in (pos, *(t for k, t in COUNT_ONLY_EXTRA if k == (rule.tier, rule.index))):
+        assert len(list(_rule_matches(rule, text, _Folded(text)))) == 1, text
+    assert not list(_rule_matches(rule, neg, _Folded(neg)))
+
+
+@pytest.mark.parametrize("key", ["handling", "reject", "key_boundary"])
+def test_count_only_rules_reject_tokenizer_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
+) -> None:
+    value = {"handling": "'data_block_line'", "reject": "['x']", "key_boundary": "true"}[key]
+    path = _use(
+        tmp_path,
+        monkeypatch,
+        f"tier_a:\n  - pattern: 'a{{3}}'\ntier_c:\n  - pattern: 'b{{3}}'\n    {key}: {value}\n",
+    )
+    with pytest.raises(ValueError, match="tokenizer-only"):
+        load_count_rules(path)
+    assert [r.tier for r in load_rules(path)] == ["a"]
 
 
 @pytest.mark.parametrize(
@@ -143,6 +190,41 @@ def test_prefilter_matches_plain_finditer(rule: Rule) -> None:
     assert got == expected
     if rule.handling != "data_block_line":
         assert expected, "corpus never exercises this rule"
+
+
+COUNT_CORPUS = (
+    CORPUS
+    + "\n"
+    + "\n".join(t for pair in COUNT_ONLY.values() for t in pair)
+    + "\n".join(t for _, t in COUNT_ONLY_EXTRA)
+)
+
+
+@pytest.mark.parametrize("rule", COUNT_ONLY_RULES, ids=lambda r: f"{r.tier}{r.index}")
+def test_count_only_prefilter_matches_plain_finditer(rule: Rule) -> None:
+    expected = [m.span() for m in rule.regex.finditer(COUNT_CORPUS)]
+    got = [m.span() for m in _rule_matches(rule, COUNT_CORPUS, _Folded(COUNT_CORPUS))]
+    assert got == expected and expected
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        string.ascii_letters * 20000,
+        "a" * 1_000_000,
+        "w_" * 500_000,
+        "apikey" + "a" * 1_000_000,
+        "secret=" + "A" * 1_000_000,
+    ],
+    ids=["alnum", "a", "w_", "apikey", "secret"],
+)
+def test_count_only_rules_stay_linear_on_large_blobs(blob: str) -> None:
+    import time
+
+    start = time.perf_counter()
+    for rule in COUNT_ONLY_RULES:
+        list(_rule_matches(rule, blob, _Folded(blob)))
+    assert time.perf_counter() - start < 1.5
 
 
 def _use(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, content: str) -> Path:

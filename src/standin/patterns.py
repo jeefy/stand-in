@@ -1,4 +1,5 @@
-"""Load the Tier A / Tier B rules from patterns.yaml."""
+"""Load the credential rules from patterns.yaml: Tier A / Tier B (tokenized) and
+Tier C / Tier D (count-only)."""
 
 from __future__ import annotations
 
@@ -12,7 +13,11 @@ import yaml
 
 Handling = Literal["whole", "value_only", "pem_span", "data_block_line"]
 HANDLINGS: frozenset[str] = frozenset({"whole", "value_only", "pem_span", "data_block_line"})
+# Tiers the tokenizer rewrites, and every tier the new-turn count covers.
 TIERS: tuple[str, ...] = ("a", "b")
+COUNT_TIERS: tuple[str, ...] = ("a", "b", "c", "d")
+# Count-only tiers are plain finditer: none of the span modifiers apply.
+_TOKENIZE_ONLY_KEYS = ("handling", "reject", "key_boundary")
 
 PATTERNS_ENV = "STANDIN_PATTERNS_FILE"
 
@@ -57,17 +62,36 @@ def default_patterns_path() -> Path:
     raise FileNotFoundError("patterns.yaml not found; set " + PATTERNS_ENV)
 
 
-def load_raw(path: Path | None = None) -> dict[str, list[dict[str, Any]]]:
+def load_raw(
+    path: Path | None = None, tiers: tuple[str, ...] = COUNT_TIERS
+) -> dict[str, list[dict[str, Any]]]:
     data = yaml.safe_load((path or default_patterns_path()).read_text())
     if not isinstance(data, dict):
         raise ValueError("patterns.yaml must be a mapping")
-    return {tier: list(data.get(f"tier_{tier}") or []) for tier in TIERS}
+    return {tier: list(data.get(f"tier_{tier}") or []) for tier in tiers}
 
 
 def load_rules(path: Path | None = None) -> list[Rule]:
+    """The tokenized rules: Tier A and Tier B."""
     rules: list[Rule] = []
-    for tier, entries in load_raw(path).items():
+    for tier, entries in load_raw(path, TIERS).items():
         for index, entry in enumerate(entries):
+            rules.append(_build_rule(tier, index, entry))
+    if not rules:
+        raise ValueError("patterns.yaml has no rules")
+    return rules
+
+
+def load_count_rules(path: Path | None = None) -> list[Rule]:
+    """Every rule the new-turn count runs: Tier A and B exactly as tokenized,
+    then the count-only Tier C and D."""
+    rules: list[Rule] = []
+    for tier, entries in load_raw(path, COUNT_TIERS).items():
+        for index, entry in enumerate(entries):
+            if tier not in TIERS and isinstance(entry, dict):
+                for key in _TOKENIZE_ONLY_KEYS:
+                    if key in entry:
+                        raise ValueError(f"tier {tier} rule {index}: {key} is tokenizer-only")
             rules.append(_build_rule(tier, index, entry))
     if not rules:
         raise ValueError("patterns.yaml has no rules")

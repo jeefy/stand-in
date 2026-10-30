@@ -1,4 +1,5 @@
-# Tier A / Tier B credential patterns tokenized by stand-in.
+# Credential patterns: Tier A / Tier B are tokenized by stand-in, Tier C / Tier
+# D are only counted.
 #
 # Tier A: vendor-prefixed tokens (unique prefixes, near-zero false positives).
 # Tier B: key material (PEM private keys, base64 key blocks, kubeconfig and
@@ -7,9 +8,15 @@
 # agentgateway audit config, so a gateway audit and this processor can be
 # compared rule-for-rule. Rule indices are metric labels: append new rules at
 # the end of a tier (and at the same position in the gateway block), never
-# reorder or delete. Tier C/D (contextual key=value and generic password=) are
-# deliberately not tokenized: too noisy to rewrite silently. Patterns stay in
-# the Rust `regex` subset (no lookaround, no backreferences).
+# reorder or delete. Patterns stay in the Rust `regex` subset (no lookaround,
+# no backreferences).
+#
+# Tier C (contextual key=value, Authorization headers, DSNs with a password)
+# and Tier D (generic password=) are too noisy to rewrite silently: they are
+# never tokenized, only counted in the newest turn of each request
+# (STANDIN_COUNT_NEW). Rule i of tier_c is the gateway's Tier C block Ci (one
+# rule per block, in the same order) and tier_d is its last block, so the
+# indices line up with the gateway audit too. No `handling` for C/D.
 #
 # `handling` (stand-in only; not part of the gateway pattern syntax):
 #   (absent)         replace the whole match
@@ -104,3 +111,32 @@ tier_b:
   # hex reject: a 64-hex x-api-key went upstream raw on 2026-10-28.
   - pattern: '(?i)(?:x-api-key|x-plex-token|x-nsone-key|x-gitlab-token|private-token|x-vault-token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
     handling: value_only
+tier_c:
+  # C0: key/secret/token-named assignment
+  - pattern: '(?i)(?:api[_-]?key|apikey|client[_-]?secret|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|private[_-]?key|encryption[_-]?key|session[_-]?secret|jwt[_-]?secret|admin[_-]?token|[a-z0-9]+_token|[a-z0-9]+_secret|[a-z0-9]+_key)[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9_\-./+=]{24,}'
+    # Python `re` retries `[a-z0-9]+_token` from every offset of a long
+    # alphanumeric run (quadratic; the gateway's Rust regex is linear), so it
+    # only runs near these literals: the `_` of the generic branches, plus
+    # the named keys without `_`. A generic key name longer than `lead` is
+    # matched from `lead` characters before its `_` (same count, shorter span).
+    required: ['_token', '_secret', '_key', 'apikey', 'api-key', 'clientsecret', 'client-secret', 'secretkey', 'secret-key', 'accesstoken', 'access-token', 'authtoken', 'auth-token', 'bearertoken', 'bearer-token', 'privatekey', 'private-key', 'encryptionkey', 'encryption-key', 'sessionsecret', 'session-secret', 'jwtsecret', 'jwt-secret', 'admintoken', 'admin-token']
+    lead: 32
+  # C1: *arr/media/network service key, token or password
+  - pattern: '(?i)(?:sonarr|radarr|readarr|lidarr|prowlarr|bazarr|jellyfin|tautulli|tmdb|plex|qbit[a-z]*|nsone|ns1|unifi|adguard)[\w .-]{0,20}?(?:api[_-]?key|apikey|token|password)[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9_-]{20,}'
+  # C2: Gitea/Forgejo/Renovate 40-hex token
+  - pattern: '(?i)(?:gitea|forgejo|renovate)[\w .-]{0,20}?(?:token|key)[\"\x27 ]*[:=][\"\x27 ]*[0-9a-f]{40}'
+  # C3: API-key request headers (same pattern as tier_b rule 5)
+  - pattern: '(?i)(?:x-api-key|x-plex-token|x-nsone-key|x-gitlab-token|private-token|x-vault-token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
+  # C4: raw Authorization header
+  - pattern: '(?i)authorization[\"\x27 ]*:[\"\x27 ]*(?:bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{20,}'
+  # C5: URL/DSN with a literal password
+  - pattern: '(?i)(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqps?|mqtt|nats|ldaps?|smtps?|ftp|sftp|https?)://[^/\s:@\x24]{1,64}:[^/\s@\x24]{8,}@[A-Za-z0-9.-]'
+    required: ['://']
+    lead: 11
+  # C6: AWS-style secret access key
+  - pattern: '(?i)(?:aws)?[\w.-]{0,20}?secret[\w .-]{0,5}?(?:access)?[\w .-]{0,5}?key[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9/+=]{40}\b'
+    required: [secret]
+    lead: 23
+tier_d:
+  # generic password assignment
+  - pattern: '(?i)(?:password|passwd|pwd|passphrase)[\"\x27 ]*[:=][\"\x27 ]*[^\s\"\x27<>\x24`{}\\]{8,}'
