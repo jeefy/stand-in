@@ -20,6 +20,9 @@ Environment:
   STANDIN_DEFER_REQUEST_HEADERS  true; answer request_headers after the body so
                                  dynamic_metadata carries the counts
   STANDIN_PATTERNS_FILE          override patterns.yaml
+  STANDIN_COUNT_NEW              false; also count Tier A-D matches in the
+                                 newest turn of each request (metrics and
+                                 metadata only; the body path is unchanged)
   LOG_LEVEL                      INFO; DEBUG adds tracebacks to error logs
 """
 
@@ -42,6 +45,7 @@ from prometheus_client import start_http_server
 from standin._proto.envoy.service.ext_proc.v3 import (
     external_processor_pb2_grpc as pb_grpc,
 )
+from standin.patterns import load_count_rules
 from standin.server import (
     DEFAULT_CHUNK_BYTES,
     DEFAULT_MAX_BODY_BYTES,
@@ -89,6 +93,7 @@ class Settings:
     drain: float = 10.0
     grace: float = 600.0
     defer_request_headers: bool = True
+    count_new: bool = False
 
 
 def _fail(message: str, **extra: object) -> SystemExit:
@@ -159,6 +164,7 @@ def _settings_from_env(env: Mapping[str, str]) -> Settings:
         drain=_float(env, "STANDIN_DRAIN_SECONDS", 10.0),
         grace=_float(env, "STANDIN_SHUTDOWN_GRACE", 600.0),
         defer_request_headers=_bool(env, "STANDIN_DEFER_REQUEST_HEADERS", True),
+        count_new=_bool(env, "STANDIN_COUNT_NEW", False),
     )
 
 
@@ -225,17 +231,25 @@ async def serve(
 def main() -> None:
     _configure_logging()
     settings = _settings_from_env(os.environ)
+    # Load (and validate) every rule before any worker starts.
+    tokenizer = Tokenizer(
+        salt=settings.salt,
+        count_rules=load_count_rules() if settings.count_new else None,
+    )
     pool = None
     if settings.tokenize_workers > 0:
-        pool = start_tokenize_pool(settings.tokenize_workers, salt=settings.salt)
+        pool = start_tokenize_pool(
+            settings.tokenize_workers, salt=settings.salt, count_new=settings.count_new
+        )
     processor = ExternalProcessor(
-        Tokenizer(salt=settings.salt),
+        tokenizer,
         mode=settings.mode,
         chunk_bytes=settings.chunk_bytes,
         defer_request_headers=settings.defer_request_headers,
         max_body_bytes=settings.max_body_bytes,
         pool=pool,
         offload_bytes=settings.offload_bytes,
+        count_new=settings.count_new,
     )
     start_http_server(settings.metrics_port)
 

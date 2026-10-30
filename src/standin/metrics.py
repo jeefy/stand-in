@@ -47,3 +47,13 @@ CACHE_HITS = Counter(
     "standin_cache_hits",
     "String literals whose scan result came from the per-literal cache",
 )
+NEW_MATCHES = Counter(
+    "standin_new_matches",
+    "Rule matches in the newest turn of request bodies, Tier A-D (STANDIN_COUNT_NEW)",
+    ["tier", "pattern_index"],
+)
+TURN_SCOPE = Counter(
+    "standin_turn_scope",
+    "What the new-turn count scanned: tail, first (whole body), input_only, none",
+    ["scope"],
+)

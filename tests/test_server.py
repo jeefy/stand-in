@@ -19,6 +19,7 @@ from standin._proto.envoy.service.ext_proc.v3 import external_processor_pb2 as p
 from standin._proto.envoy.service.ext_proc.v3 import (
     external_processor_pb2_grpc as pb_grpc,
 )
+from standin.patterns import load_count_rules
 from standin.server import ExternalProcessor, make_tokenize_pool
 from standin.sse import SseRestorer
 from standin.tokenizer import Tokenizer
@@ -730,3 +731,82 @@ async def test_exchange_log_carries_counts_only(caplog: pytest.LogCaptureFixture
     clean = json.dumps({"messages": [{"role": "user", "content": "hello"}]}).encode()
     await _drive(_proc(), _exchange(clean, [b"{}"], "application/json"))
     assert not [r for r in caplog.records if r.getMessage() == "exchange"]
+
+
+def _count_tok() -> Tokenizer:
+    return Tokenizer(salt="server-tests", cache_entries=0, count_rules=load_count_rules())
+
+
+def _continuation_body() -> bytes:
+    doc = json.loads(_request_body())
+    doc["messages"][1:1] = [{"role": "assistant", "content": None, "tool_calls": []}]
+    doc["messages"].append({"role": "user", "content": "password=" + "FAKE0TEST0FA"})
+    return json.dumps(doc).encode()
+
+
+@pytest.mark.parametrize("mode", ["enforce", "shadow"])
+async def test_count_new_leaves_body_identical(mode: str) -> None:
+    body = _continuation_body()
+    reqs = _exchange(body, _sse_response(f"echo {PH}"), "text/event-stream")
+    off, _ = await _drive(_proc(TOK, mode=mode), reqs)
+    on, _ = await _drive(_proc(_count_tok(), mode=mode, count_new=True), reqs)
+    assert _request_leg(off) == _request_leg(on)
+    assert _bodies(off, "response_body") == _bodies(on, "response_body")
+    meta_off, meta_on = _meta(off[0]), _meta(on[0])
+    assert not any(k.startswith("new_") for k in meta_off)
+    assert {k: v for k, v in meta_on.items() if not k.startswith("new_")} == meta_off
+    assert (meta_on["new_a"], meta_on["new_b"], meta_on["new_c"], meta_on["new_d"]) == (
+        1,
+        0,
+        0,
+        1,
+    )
+
+
+async def test_count_new_metrics() -> None:
+    scope = _sample("standin_turn_scope_total", scope="tail")
+    hits_d = _sample("standin_new_matches_total", tier="d", pattern_index="0")
+    await _drive(
+        _proc(_count_tok(), count_new=True),
+        _exchange(_continuation_body(), [b"{}"], "application/json"),
+    )
+    assert _sample("standin_turn_scope_total", scope="tail") - scope == 1
+    assert _sample("standin_new_matches_total", tier="d", pattern_index="0") - hits_d == 1
+
+
+async def test_count_new_error_leaves_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    tok = _count_tok()
+
+    def boom(body: bytes) -> None:
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(tok, "count_new", boom)
+    body = _continuation_body()
+    before = _sample("standin_errors_total", phase="count_new")
+    responses, code = await _drive(
+        _proc(tok, count_new=True), _exchange(body, [b"{}"], "application/json")
+    )
+    assert code == grpc.StatusCode.OK
+    sent, _ = _request_leg(responses)
+    off, _ = await _drive(_proc(TOK), _exchange(body, [b"{}"], "application/json"))
+    assert sent == _request_leg(off)[0] and TSKEY.encode() not in sent
+    assert not any(k.startswith("new_") for k in _meta(responses[0]))
+    assert _sample("standin_errors_total", phase="count_new") - before == 1
+
+
+async def test_count_new_in_pool() -> None:
+    executor = make_tokenize_pool(1, salt="server-tests", cache_entries=0, count_new=True)
+    try:
+        responses, _ = await _drive(
+            _proc(_count_tok(), pool=executor, offload_bytes=10, count_new=True),
+            _exchange(_continuation_body(), [b"{}"], "application/json"),
+        )
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+    meta = _meta(responses[0])
+    assert (meta["tokenized"], meta["new_a"], meta["new_d"]) == (1, 1, 1)
+
+
+def test_settings_count_new() -> None:
+    assert not main_mod._settings_from_env({}).count_new
+    assert main_mod._settings_from_env({"STANDIN_COUNT_NEW": "true"}).count_new

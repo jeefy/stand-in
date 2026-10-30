@@ -133,3 +133,184 @@ EXTRA_NEGATIVE: list[tuple[tuple[str, int], str]] = [
     (("b", 5), '"x-api-key": "<your-api-key>"'),
     (("b", 5), "the x-api-key header carries the key"),
 ]
+
+# Count-only rules (Tier C/D, never tokenized): (tier, index) -> (text with one
+# match, text with none).
+COUNT_ONLY: dict[tuple[str, int], tuple[str, str]] = {
+    ("c", 0): ("my_service_token=" + fill(30), "api_key=short"),
+    ("c", 1): ("SONARR_API_KEY=" + HEX40[:32], "SONARR_API_KEY=<your-api-key>"),
+    ("c", 2): ("GITEA_TOKEN=" + HEX40, "GITEA_TOKEN=" + HEX40[:20]),
+    ("c", 3): ("x-api-key: " + fill(20), "x-api-key: short"),
+    ("c", 4): ("Authorization: Bearer " + fill(24), "Authorization: Bearer short"),
+    ("c", 5): ("postgres://app:" + fill(12) + "@db.example", "postgres://app:${DB_PASS}@db"),
+    ("c", 6): ("aws_secret_access_key = " + fill(40), "aws_secret_access_key = " + fill(20)),
+    ("d", 0): ("password=" + fill(12), "password=<redacted>"),
+}
+# More count-only cases: (tier, index), text with exactly one match.
+COUNT_ONLY_EXTRA: list[tuple[tuple[str, int], str]] = [
+    (("c", 0), '"apiKey": "' + fill(30) + '"'),
+    (("c", 0), "Client-Secret=" + fill(30)),
+    (("c", 0), "ENCRYPTION_KEY: " + fill(30, "FAKE/TEST+")),
+    (("c", 1), "jellyfin_api_key: " + HEX40[:32]),
+    (("c", 4), "authorization: token " + fill(24)),
+    (("c", 5), "mongodb+srv://app:" + fill(12) + "@cluster0.example"),
+    (("c", 6), "SECRET_KEY=" + fill(40, "FAKE/TEST0")),
+    (("d", 0), "PASSWD: " + fill(12)),
+]
+
+# Newest-turn fixtures, one per wire format. OLD only ever sits in history;
+# NEW_A and NEW_D only in the newest turn; SYS_C only in system/instructions.
+OLD = "ghp_" + fill(24)
+NEW_A = "glpat-" + fill(22, "FAKE_TEST-")
+NEW_D = "password=" + fill(12)
+SYS_C = "Authorization: Bearer " + fill(24)
+IMAGE_B64 = "ghp_" + fill(40)  # would be Tier A if base64 payloads were scanned
+_TOOLS = [{"name": "bash", "description": "run a command", "input_schema": {"type": "object"}}]
+_TOOL_USE = {"type": "tool_use", "id": "toolu_01", "name": "bash", "input": {"command": "env"}}
+_CALL = {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+
+# name -> (request body, scope, new-turn counts per tier)
+TURN_CASES: dict[str, tuple[dict[str, object], str, dict[str, int]]] = {
+    "anthropic_first_turn": (
+        {
+            "model": "m",
+            "system": [{"type": "text", "text": "ops notes: " + SYS_C}],
+            "tools": _TOOLS,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": "use " + OLD}]}],
+        },
+        "first",
+        {"a": 1, "b": 0, "c": 1, "d": 0},
+    ),
+    "anthropic_tool_continuation": (
+        {
+            "model": "m",
+            "system": [{"type": "text", "text": "ops notes: " + SYS_C}],
+            "tools": _TOOLS,
+            "messages": [
+                {"role": "user", "content": "use " + OLD},
+                {"role": "assistant", "content": [{"type": "text", "text": "ok"}, _TOOL_USE]},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "toolu_01",
+                            "content": [
+                                {"type": "text", "text": NEW_D + "\n" + NEW_A},
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": IMAGE_B64,
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                },
+            ],
+        },
+        "tail",
+        {"a": 1, "b": 0, "c": 0, "d": 1},
+    ),
+    "anthropic_prefill": (
+        {
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "use " + OLD},
+                {"role": "assistant", "content": "done"},
+                {"role": "user", "content": "now " + NEW_D},
+                {"role": "assistant", "content": "{"},
+            ],
+        },
+        "tail",
+        {"a": 0, "b": 0, "c": 0, "d": 1},
+    ),
+    "anthropic_prefill_first_turn": (
+        {
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "use " + OLD},
+                {"role": "assistant", "content": "{"},
+            ],
+        },
+        "first",
+        {"a": 1, "b": 0, "c": 0, "d": 0},
+    ),
+    "openai_chat_tool_continuation": (
+        {
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": SYS_C},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "use " + OLD},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,x"}},
+                    ],
+                },
+                {"role": "assistant", "content": None, "tool_calls": [_CALL]},
+                {"role": "tool", "tool_call_id": "call_1", "content": NEW_A},
+                {"role": "tool", "tool_call_id": "call_2", "content": NEW_D},
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": IMAGE_B64}}],
+                },
+            ],
+        },
+        "tail",
+        {"a": 1, "b": 0, "c": 0, "d": 1},
+    ),
+    "responses_first_turn": (
+        {"model": "m", "instructions": SYS_C, "input": [{"role": "user", "content": OLD}]},
+        "first",
+        {"a": 1, "b": 0, "c": 1, "d": 0},
+    ),
+    "responses_continuation": (
+        {
+            "model": "m",
+            "instructions": SYS_C,
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "use " + OLD}]},
+                {
+                    "type": "reasoning",
+                    "id": "rs_1",
+                    "summary": [{"type": "summary_text", "text": OLD}],
+                },
+                {"type": "function_call", "call_id": "c1", "name": "bash", "arguments": "{}"},
+                {"type": "function_call_output", "call_id": "c1", "output": NEW_A + " " + NEW_D},
+                {"type": "input_image", "image_url": IMAGE_B64},
+            ],
+        },
+        "tail",
+        {"a": 1, "b": 0, "c": 0, "d": 1},
+    ),
+    "responses_previous_response_id": (
+        {
+            "model": "m",
+            "previous_response_id": "resp_0001",
+            "instructions": SYS_C,
+            "input": [{"type": "function_call_output", "call_id": "c1", "output": NEW_D}],
+        },
+        "input_only",
+        {"a": 0, "b": 0, "c": 0, "d": 1},
+    ),
+    "responses_string_input": (
+        {"model": "m", "instructions": SYS_C, "input": "use " + OLD},
+        "first",
+        {"a": 1, "b": 0, "c": 1, "d": 0},
+    ),
+    "compaction": (
+        {
+            "model": "m",
+            "system": "ops notes: " + SYS_C,
+            "messages": [
+                {"role": "user", "content": "Summary of the session so far: deployed with " + OLD},
+                {"role": "user", "content": "Continue."},
+            ],
+        },
+        "first",
+        {"a": 1, "b": 0, "c": 1, "d": 0},
+    ),
+}

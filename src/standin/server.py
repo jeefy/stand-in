@@ -24,6 +24,10 @@ processingOptions; both body legs are fullDuplexStreamed).
   body meanwhile; verified with scripts/twin.sh). STANDIN_DEFER_REQUEST_HEADERS=false
   answers immediately instead (counts then read 0). The response_headers
   response repeats the struct for processors that honour it.
+- STANDIN_COUNT_NEW: the same pass also counts Tier A-D matches in the newest
+  turn only (standin.turns), for metrics and metadata. It reads the body and
+  never changes what is sent; a counting error is its own error phase
+  (``count_new``) and leaves the tokenized body as it is.
 - Errors never surface as gRPC errors (a response-side error fails the user's
   request): the exchange degrades to pass-through, and if even that fails the
   handler returns, which agentgateway treats as "skip the remaining phases".
@@ -55,8 +59,9 @@ from standin._proto.envoy.service.ext_proc.v3 import (
     external_processor_pb2_grpc as pb_grpc,
 )
 from standin.json_restorer import JsonRestorer
+from standin.patterns import load_count_rules
 from standin.sse import SseRestorer
-from standin.tokenizer import Restorer, Tokenizer, TokenizeResult
+from standin.tokenizer import NewCounts, Restorer, Tokenizer, TokenizeResult
 
 log = logging.getLogger("standin.server")
 
@@ -80,25 +85,51 @@ def _debug() -> bool:
 
 _WORKER_TOKENIZER: Tokenizer | None = None
 
+# tokenize_json(body), the scan-cache hit delta, and the new-turn counts (None
+# unless counting is on).
+ScanResult = tuple[TokenizeResult | None, int, NewCounts | None]
 
-def _init_worker(salt: str | None, cache_entries: int | None) -> None:
+
+def _init_worker(salt: str | None, cache_entries: int | None, count_new: bool = False) -> None:
     global _WORKER_TOKENIZER
     # Ctrl-C reaches the whole process group; the parent shuts the pool down.
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    _WORKER_TOKENIZER = Tokenizer(salt=salt, cache_entries=cache_entries)
+    _WORKER_TOKENIZER = Tokenizer(
+        salt=salt,
+        cache_entries=cache_entries,
+        count_rules=load_count_rules() if count_new else None,
+    )
 
 
-def _tokenize_worker(body: bytes) -> tuple[TokenizeResult | None, int]:
+def _count_new(tok: Tokenizer, body: bytes) -> NewCounts:
+    """``tok.count_new(body)``; an exception becomes ``NewCounts.error`` so it
+    can never take the tokenize result with it."""
+    try:
+        return tok.count_new(body)
+    except Exception as exc:
+        return NewCounts("none", error=type(exc).__name__)
+
+
+def _scan(tok: Tokenizer, body: bytes, count_new: bool) -> ScanResult:
+    before = tok.cache_hits
+    result = tok.tokenize_json(body)
+    cache_hits = tok.cache_hits - before
+    return result, cache_hits, _count_new(tok, body) if count_new else None
+
+
+def _tokenize_worker(body: bytes, count_new: bool = False) -> ScanResult:
     tok = _WORKER_TOKENIZER
     if tok is None:
         raise RuntimeError("tokenize worker not initialised")
-    before = tok.cache_hits
-    result = tok.tokenize_json(body)
-    return result, tok.cache_hits - before
+    return _scan(tok, body, count_new)
 
 
 def make_tokenize_pool(
-    workers: int, *, salt: str | None = None, cache_entries: int | None = None
+    workers: int,
+    *,
+    salt: str | None = None,
+    cache_entries: int | None = None,
+    count_new: bool = False,
 ) -> ProcessPoolExecutor:
     """A spawn-context pool whose workers each build their own Tokenizer
     (``salt``/``cache_entries`` None = read from the environment, as in the parent)."""
@@ -106,7 +137,7 @@ def make_tokenize_pool(
         max_workers=workers,
         mp_context=multiprocessing.get_context("spawn"),
         initializer=_init_worker,
-        initargs=(salt, cache_entries),
+        initargs=(salt, cache_entries, count_new),
     )
 
 
@@ -115,14 +146,16 @@ def start_tokenize_pool(
     *,
     salt: str | None = None,
     cache_entries: int | None = None,
+    count_new: bool = False,
     timeout: float = 60.0,
 ) -> ProcessPoolExecutor | None:
     """Create the pool and start every worker now (not on the first large
     body). Returns None, after logging, if the workers cannot start; the
     processor then tokenizes inline."""
-    pool = make_tokenize_pool(workers, salt=salt, cache_entries=cache_entries)
+    pool = make_tokenize_pool(workers, salt=salt, cache_entries=cache_entries, count_new=count_new)
     try:
-        for future in [pool.submit(_tokenize_worker, b"{}") for _ in range(workers)]:
+        warmups = [pool.submit(_tokenize_worker, b"{}", count_new) for _ in range(workers)]
+        for future in warmups:
             future.result(timeout=timeout)
     except Exception as exc:
         log.error(
@@ -179,6 +212,7 @@ class _Exchange:
         self.request_answered = False
         self.oversize = False
         self.result: TokenizeResult | None = None
+        self.new: NewCounts | None = None
         self.restorer: _Stream = _Passthrough()
         self.outcome = "incomplete"
         self.restored_reported = 0
@@ -188,19 +222,18 @@ class _Exchange:
     def metadata(self) -> struct_pb2.Struct:
         result = self.result
         tiers = result.tier_counts() if result else {"a": 0, "b": 0}
+        fields: dict[str, str | int] = {
+            "mode": self.mode,
+            "tokenized": result.replaced if result else 0,
+            "distinct": result.distinct if result else 0,
+            "tier_a": tiers["a"],
+            "tier_b": tiers["b"],
+            "restored": self.restorer.restored,
+        }
+        if self.new is not None:
+            fields.update({f"new_{t}": n for t, n in self.new.tier_counts().items()})
         meta = struct_pb2.Struct()
-        meta.update(
-            {
-                METADATA_KEY: {
-                    "mode": self.mode,
-                    "tokenized": result.replaced if result else 0,
-                    "distinct": result.distinct if result else 0,
-                    "tier_a": tiers["a"],
-                    "tier_b": tiers["b"],
-                    "restored": self.restorer.restored,
-                }
-            }
-        )
+        meta.update({METADATA_KEY: fields})
         return meta
 
     async def handle(self, req: pb.ProcessingRequest) -> list[pb.ProcessingResponse]:
@@ -303,10 +336,12 @@ class _Exchange:
     async def _tokenize(self, body: bytes) -> bytes:
         metrics.BODY_BYTES.observe(len(body))
         started = time.perf_counter()
-        result, cache_hits = await self.processor.tokenize(body)
+        result, cache_hits, new = await self.processor.tokenize(body)
         metrics.TOKENIZE_SECONDS.observe(time.perf_counter() - started)
         if cache_hits:
             metrics.CACHE_HITS.inc(cache_hits)
+        if new is not None:
+            self._record_new(new, len(body))
         if result is None:
             self.outcome = "skipped_non_json"
             return body
@@ -320,6 +355,23 @@ class _Exchange:
         if self.mode != "enforce":
             return body
         return result.text.encode("utf-8")
+
+    def _record_new(self, new: NewCounts, size: int) -> None:
+        """Metrics for the new-turn count; never raises into the body path."""
+        try:
+            if new.error is not None:
+                raise RuntimeError(new.error)
+            metrics.TURN_SCOPE.labels(scope=new.scope).inc()
+            for tier, index in new.hits:
+                metrics.NEW_MATCHES.labels(tier=tier, pattern_index=str(index)).inc()
+            self.new = new
+        except Exception as exc:
+            metrics.ERRORS.labels(phase="count_new").inc()
+            log.error(
+                "new-turn count failed; body unaffected",
+                extra={"error": new.error or type(exc).__name__, "bytes": size},
+                exc_info=_debug() and new.error is None,
+            )
 
     def _choose_restorer(self, headers: pb.HttpHeaders) -> None:
         if self.mode != "enforce" or self.result is None or not self.result.mapping:
@@ -412,6 +464,7 @@ class ExternalProcessor(pb_grpc.ExternalProcessorServicer):
         max_body_bytes: int = DEFAULT_MAX_BODY_BYTES,
         pool: Executor | None = None,
         offload_bytes: int = DEFAULT_OFFLOAD_BYTES,
+        count_new: bool = False,
     ) -> None:
         if mode not in MODES:
             raise ValueError(f"STANDIN_MODE must be one of {MODES}")
@@ -425,15 +478,18 @@ class ExternalProcessor(pb_grpc.ExternalProcessorServicer):
         # ``tokenizer`` (make_tokenize_pool / start_tokenize_pool).
         self.pool = pool
         self.offload_bytes = offload_bytes
+        # Count Tier A-D matches in the newest turn (metrics and metadata only).
+        self.count_new = count_new
 
-    async def tokenize(self, body: bytes) -> tuple[TokenizeResult | None, int]:
-        """``tokenize_json(body)`` and the scan-cache hit delta; off the event
-        loop when a pool is set and the body is large enough."""
+    async def tokenize(self, body: bytes) -> ScanResult:
+        """``tokenize_json(body)``, the scan-cache hit delta, and the new-turn
+        counts when ``count_new`` is on; off the event loop when a pool is set
+        and the body is large enough."""
         pool = self.pool
         if pool is not None and len(body) >= self.offload_bytes:
             loop = asyncio.get_running_loop()
             try:
-                return await loop.run_in_executor(pool, _tokenize_worker, body)
+                return await loop.run_in_executor(pool, _tokenize_worker, body, self.count_new)
             except BrokenProcessPool as exc:
                 if self.pool is pool:
                     self.pool = None
@@ -444,9 +500,7 @@ class ExternalProcessor(pb_grpc.ExternalProcessorServicer):
                         exc_info=_debug(),
                     )
                     pool.shutdown(wait=False, cancel_futures=True)
-        before = self.tokenizer.cache_hits
-        result = self.tokenizer.tokenize_json(body)
-        return result, self.tokenizer.cache_hits - before
+        return _scan(self.tokenizer, body, self.count_new)
 
     async def Process(
         self,
@@ -486,15 +540,15 @@ class ExternalProcessor(pb_grpc.ExternalProcessorServicer):
             result = ex.result
             if result is not None and (result.replaced or ex.restorer.restored):
                 tiers = result.tier_counts()
-                log.info(
-                    "exchange",
-                    extra={
-                        "mode": self.mode,
-                        "outcome": ex.outcome,
-                        "tokenized": result.replaced,
-                        "distinct": result.distinct,
-                        "tier_a": tiers["a"],
-                        "tier_b": tiers["b"],
-                        "restored": ex.restorer.restored,
-                    },
-                )
+                extra: dict[str, str | int] = {
+                    "mode": self.mode,
+                    "outcome": ex.outcome,
+                    "tokenized": result.replaced,
+                    "distinct": result.distinct,
+                    "tier_a": tiers["a"],
+                    "tier_b": tiers["b"],
+                    "restored": ex.restorer.restored,
+                }
+                if ex.new is not None:
+                    extra.update({f"new_{t}": n for t, n in ex.new.tier_counts().items()})
+                log.info("exchange", extra=extra)
