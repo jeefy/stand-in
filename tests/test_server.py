@@ -23,6 +23,7 @@ from standin.patterns import load_count_rules
 from standin.server import ExternalProcessor, make_tokenize_pool
 from standin.sse import SseRestorer
 from standin.tokenizer import Tokenizer
+from standin.turns import SCOPES
 
 TOK = Tokenizer(salt="server-tests", cache_entries=0)
 PH = TOK.placeholder(TSKEY)
@@ -805,6 +806,76 @@ async def test_count_new_in_pool() -> None:
         executor.shutdown(wait=True, cancel_futures=True)
     meta = _meta(responses[0])
     assert (meta["tokenized"], meta["new_a"], meta["new_d"]) == (1, 1, 1)
+
+
+def _scopes() -> float:
+    return sum(_sample("standin_turn_scope_total", scope=s) for s in SCOPES)
+
+
+@pytest.fixture(scope="module")
+def count_pool() -> Iterator[ProcessPoolExecutor]:
+    executor = make_tokenize_pool(1, salt="server-tests", cache_entries=0, count_new=True)
+    yield executor
+    executor.shutdown(wait=True, cancel_futures=True)
+
+
+@pytest.mark.parametrize("mode", ["enforce", "shadow"])
+@pytest.mark.parametrize("offload", [False, True])
+@pytest.mark.parametrize(
+    ("body", "outcome"),
+    [
+        (_continuation_body(), "tokenized"),
+        (json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode(), "clean"),
+        (b"not json", "skipped_non_json"),
+    ],
+    ids=["tokenized", "clean", "non_json"],
+)
+async def test_count_new_once_per_body(
+    count_pool: ProcessPoolExecutor, mode: str, offload: bool, body: bytes, outcome: str
+) -> None:
+    pool = {"pool": count_pool, "offload_bytes": 1} if offload else {}
+    before = _scopes(), _sample("standin_requests_total", mode=mode, outcome=outcome)
+    await _drive(
+        _proc(_count_tok(), mode=mode, count_new=True, **pool),
+        _exchange(body, [b"{}"], "application/json"),
+    )
+    after = _scopes(), _sample("standin_requests_total", mode=mode, outcome=outcome)
+    assert (after[0] - before[0], after[1] - before[1]) == (1, 1)
+
+
+async def test_count_new_runs_when_tokenize_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    tok = _count_tok()
+
+    def boom(body: bytes) -> None:
+        raise RuntimeError("synthetic failure")
+
+    monkeypatch.setattr(tok, "tokenize_json", boom)
+    body = _continuation_body()
+    before = _scopes(), _sample("standin_errors_total", phase="request_body")
+    responses, code = await _drive(
+        _proc(tok, count_new=True), _exchange(body, [b"{}"], "application/json")
+    )
+    assert code == grpc.StatusCode.OK
+    sent, _ = _request_leg(responses)
+    assert sent == body
+    assert _scopes() - before[0] == 1
+    assert _sample("standin_errors_total", phase="request_body") - before[1] == 1
+    meta = _meta(responses[0])
+    assert (meta["tokenized"], meta["new_a"], meta["new_d"]) == (0, 1, 1)
+
+
+async def test_count_new_runs_when_pool_tokenize_fails(count_pool: ProcessPoolExecutor) -> None:
+    # json.loads raises RecursionError (not ValueError) in the worker, so
+    # tokenize_json fails; the count still gets its pass and fails on its own.
+    body = b"[" * 100_000 + b"]" * 100_000
+    before = _scopes(), _sample("standin_errors_total", phase="count_new")
+    responses, _ = await _drive(
+        _proc(_count_tok(), pool=count_pool, offload_bytes=1, count_new=True),
+        _exchange(body, [b"{}"], "application/json"),
+    )
+    assert _request_leg(responses)[0] == body
+    assert _scopes() - before[0] == 0
+    assert _sample("standin_errors_total", phase="count_new") - before[1] == 1
 
 
 def test_settings_count_new() -> None:

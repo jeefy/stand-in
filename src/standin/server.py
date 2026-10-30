@@ -27,7 +27,8 @@ processingOptions; both body legs are fullDuplexStreamed).
 - STANDIN_COUNT_NEW: the same pass also counts Tier A-D matches in the newest
   turn only (standin.turns), for metrics and metadata. It reads the body and
   never changes what is sent; a counting error is its own error phase
-  (``count_new``) and leaves the tokenized body as it is.
+  (``count_new``) and leaves the tokenized body as it is. A body that fails
+  to tokenize (passed through, outcome ``error``) is still counted once.
 - Errors never surface as gRPC errors (a response-side error fails the user's
   request): the exchange degrades to pass-through, and if even that fails the
   handler returns, which agentgateway treats as "skip the remaining phases".
@@ -110,9 +111,25 @@ def _count_new(tok: Tokenizer, body: bytes) -> NewCounts:
         return NewCounts("none", error=type(exc).__name__)
 
 
+class ScanError(Exception):
+    """tokenize_json raised (``error`` is the exception type name); ``new``
+    holds the new-turn counts taken anyway, so a body that fails to tokenize
+    still gets its one count_new pass. Picklable for the process pool."""
+
+    def __init__(self, error: str, new: NewCounts) -> None:
+        super().__init__(error, new)
+        self.error = error
+        self.new = new
+
+
 def _scan(tok: Tokenizer, body: bytes, count_new: bool) -> ScanResult:
     before = tok.cache_hits
-    result = tok.tokenize_json(body)
+    try:
+        result = tok.tokenize_json(body)
+    except Exception as exc:
+        if not count_new:
+            raise
+        raise ScanError(type(exc).__name__, _count_new(tok, body)) from exc
     cache_hits = tok.cache_hits - before
     return result, cache_hits, _count_new(tok, body) if count_new else None
 
@@ -290,7 +307,10 @@ class _Exchange:
             metrics.ERRORS.labels(phase="request_body").inc()
             log.error(
                 "tokenize failed; request passed through",
-                extra={"error": type(exc).__name__, "bytes": len(original)},
+                extra={
+                    "error": exc.error if isinstance(exc, ScanError) else type(exc).__name__,
+                    "bytes": len(original),
+                },
                 exc_info=_debug(),
             )
             self.outcome = "error"
@@ -336,7 +356,11 @@ class _Exchange:
     async def _tokenize(self, body: bytes) -> bytes:
         metrics.BODY_BYTES.observe(len(body))
         started = time.perf_counter()
-        result, cache_hits, new = await self.processor.tokenize(body)
+        try:
+            result, cache_hits, new = await self.processor.tokenize(body)
+        except ScanError as exc:
+            self._record_new(exc.new, len(body))
+            raise
         metrics.TOKENIZE_SECONDS.observe(time.perf_counter() - started)
         if cache_hits:
             metrics.CACHE_HITS.inc(cache_hits)
