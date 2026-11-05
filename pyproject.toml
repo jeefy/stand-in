@@ -17,7 +17,7 @@ classifiers = [
 dependencies = [
     "grpcio>=1.70",
     "grpcio-health-checking>=1.70",
-    "protobuf>=6.33.5,<7",
+    "protobuf>=6.33.5,<8",
     "prometheus-client>=0.20",
     "pyyaml>=6.0",
 ]
