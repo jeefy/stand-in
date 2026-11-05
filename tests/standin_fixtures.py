@@ -99,6 +99,12 @@ POSITIVE: dict[tuple[str, int], tuple[str, str, str]] = {
     ("b", 3): ('"private_key_id": "' + "0f" * 20 + '"', "0f" * 20, '"private_key_id": "x"'),
     ("b", 4): ('"type": "service_account"', "service_account", '"type": "user"'),
     ("b", 5): ("x-api-key: " + HEX64, HEX64, "x-api-key: short"),
+    ("b", 6): ("    token: abcdef.0123456789abcdef", "abcdef.0123456789abcdef", "token: abc.def"),
+    ("b", 7): (
+        "client-secret: " + fill(24, "FAKE_TEST-"),
+        fill(24, "FAKE_TEST-"),
+        "client-secret: short",
+    ),
 }
 
 # More cases for rules with several prefixes or a value filter:

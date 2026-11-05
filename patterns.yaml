@@ -111,6 +111,13 @@ tier_b:
   # hex reject: a 64-hex x-api-key went upstream raw on 2026-10-28.
   - pattern: '(?i)(?:x-api-key|x-plex-token|x-nsone-key|x-gitlab-token|private-token|x-vault-token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
     handling: value_only
+  # kubeadm bootstrap token in a kubeconfig/join config (`token: abcdef.0123456789abcdef`);
+  # too short for the 40+ `token:` rule above.
+  - pattern: '(?i)token[\"\x27 ]*:[\"\x27 ]*[a-z0-9]{6}\.[a-z0-9]{16}'
+    handling: value_only
+  # kubeconfig auth-provider (OIDC) client-secret
+  - pattern: '(?i)(?:client-secret|idp-certificate-authority-data)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
+    handling: value_only
 tier_c:
   # C0: key/secret/token-named assignment
   - pattern: '(?i)(?:api[_-]?key|apikey|client[_-]?secret|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|private[_-]?key|encryption[_-]?key|session[_-]?secret|jwt[_-]?secret|admin[_-]?token|[a-z0-9]+_token|[a-z0-9]+_secret|[a-z0-9]+_key)[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9_\-./+=]{24,}'
