@@ -1,0 +1,95 @@
+package tokenizer
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/jeefy/stand-in/pkg/patterns"
+)
+
+func TestPlaceholderDeterminism(t *testing.T) {
+	tok1, err := NewTokenizer(nil, nil, "my-secret-salt", 0)
+	if err != nil {
+		t.Fatalf("NewTokenizer failed: %v", err)
+	}
+	tok2, err := NewTokenizer(nil, nil, "my-secret-salt", 0)
+	if err != nil {
+		t.Fatalf("NewTokenizer failed: %v", err)
+	}
+
+	secret := "ghp_1234567890abcdef1234567890abcdef"
+	ph1 := tok1.Placeholder(secret)
+	ph2 := tok2.Placeholder(secret)
+
+	if ph1 != ph2 {
+		t.Fatalf("Placeholders differ for same salt: %s != %s", ph1, ph2)
+	}
+	if !strings.HasPrefix(ph1, PlaceholderPrefix) || !strings.HasSuffix(ph1, ">>") {
+		t.Fatalf("Invalid placeholder format: %s", ph1)
+	}
+	if len(ph1) != PlaceholderLen {
+		t.Fatalf("Expected len %d, got %d for %s", PlaceholderLen, len(ph1), ph1)
+	}
+}
+
+func TestTokenizeJSON(t *testing.T) {
+	rules, err := patterns.LoadRules("../patterns/patterns.yaml")
+	if err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+	tok, err := NewTokenizer(rules, nil, "test-salt", 100)
+	if err != nil {
+		t.Fatalf("NewTokenizer: %v", err)
+	}
+
+	rawJSON := `{"prompt": "here is my token ghp_0123456789abcdef0123456789abcdef and done"}`
+	res, err := tok.TokenizeJSON([]byte(rawJSON))
+	if err != nil {
+		t.Fatalf("TokenizeJSON error: %v", err)
+	}
+	if res == nil {
+		t.Fatalf("expected non-nil result")
+	}
+
+	if len(res.Mapping) != 1 {
+		t.Fatalf("expected 1 mapped placeholder, got %d", len(res.Mapping))
+	}
+
+	var parsed map[string]string
+	if err := json.Unmarshal([]byte(res.Text), &parsed); err != nil {
+		t.Fatalf("failed to parse tokenized json: %v", err)
+	}
+
+	for ph, original := range res.Mapping {
+		if original != "ghp_0123456789abcdef0123456789abcdef" {
+			t.Errorf("wrong original secret: %s", original)
+		}
+		if !strings.Contains(parsed["prompt"], ph) {
+			t.Errorf("expected placeholder %s in output: %s", ph, parsed["prompt"])
+		}
+	}
+}
+
+func TestPartialHoldPoint(t *testing.T) {
+	cases := []struct {
+		input string
+		want  int
+	}{
+		{"hello world", 11},
+		{"hello <", 6},
+		{"hello <<", 6},
+		{"hello <<secret-", 6},
+		{"hello <<secret-1a2b", 6},
+		{"hello <<secret-1a2b3c4d5e6f>", 6},
+		{"hello <<secret-1a2b3c4d5e6f>>", 29}, // len is 29, complete placeholder is not held
+		{"something <other", 16},
+	}
+
+	for _, c := range cases {
+		got := PartialHoldPoint(c.input)
+		if got != c.want {
+			t.Errorf("PartialHoldPoint(%q) = %d; want %d", c.input, got, c.want)
+		}
+	}
+}

@@ -1,40 +1,25 @@
-# One base for both stages: the venv's python symlinks into this interpreter.
-FROM docker.io/library/python:3.12-slim@sha256:aa943ce411423c7582288f18707ff66eddcbaeb510502d747a72aeb34f30d159 AS base
-
-FROM ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 AS uv
-
-FROM base AS build
-
-COPY --from=uv /uv /bin/uv
-
-ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    UV_PYTHON_DOWNLOADS=never \
-    UV_PROJECT_ENVIRONMENT=/app/.venv
+FROM golang:alpine AS builder
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md LICENSE ./
-RUN uv sync --locked --no-dev --no-install-project
+RUN apk add --no-cache git ca-certificates tzdata
 
-COPY patterns.yaml ./
-COPY src ./src
-# Non-editable: standin and its force-included patterns.yaml land in
-# site-packages, so the venv does not depend on /app/src.
-RUN uv sync --locked --no-dev --no-editable
+COPY go.mod go.sum ./
+RUN go mod download
 
-FROM base
+COPY . .
 
-# Bytecode is compiled at build time; nothing is written at runtime, so the
-# image runs with a read-only root filesystem.
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PATH="/app/.venv/bin:${PATH}"
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o /stand-in ./cmd/stand-in
 
-WORKDIR /app
+FROM gcr.io/distroless/static:nonroot
 
-COPY --from=build /app/.venv /app/.venv
+WORKDIR /
+COPY --from=builder /stand-in /stand-in
 
-USER 1000:1000
+USER 65532:65532
+
 EXPOSE 9101 9102
-CMD ["python", "-m", "standin"]
+
+ENTRYPOINT ["/stand-in"]
+
+

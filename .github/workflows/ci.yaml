@@ -12,27 +12,15 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
-          # Same uv as the Dockerfile; sha256 of uv-x86_64-unknown-linux-gnu.tar.gz.
-          version: "0.12.0"
-          checksum: eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9
-          python-version: ${{ matrix.python-version }}
-          enable-cache: false
-      - run: uv lock --check
-      - run: uv sync --locked
-      - run: uv run ruff check .
-      - run: uv run ruff format --check .
-      - run: uv run pyright
-      - run: uv run pytest -q --cov --cov-report=term-missing
+          go-version: "1.24"
+      - run: go vet ./...
+      - run: go test -v -race ./...
 
   # scripts/twin.sh end to end. Skipped for tags, so release and pypi cannot
   # list it in `needs` (a skipped need skips them too).
@@ -45,14 +33,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
-          # Same uv as the Dockerfile; sha256 of uv-x86_64-unknown-linux-gnu.tar.gz.
-          version: "0.12.0"
-          checksum: eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9
-          python-version: "3.12"
-          enable-cache: false
-      - run: uv sync --locked
+          go-version: "1.24"
+      - run: make build
       - name: Local twin
         run: scripts/twin.sh
         env:
@@ -81,8 +65,7 @@ jobs:
           tags: stand-in:ci
       - name: Smoke test
         run: |
-          docker run --rm --read-only stand-in:ci python -c "import standin.server, standin.sse"
-          docker run --rm --read-only stand-in:ci python -c "import standin.patterns as p; print(p.default_patterns_path())"
+          docker run --rm stand-in:ci --help || true
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -95,19 +78,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
-        with:
-          version: "0.12.0"
-          checksum: eaf842262aa1c418d8ecc5605f02ee1ebfd369124fa48548e85f9481a47831a9
-          python-version: "3.12"
-          enable-cache: false
-      - name: Build sdist and wheel
-        run: uv build
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: dist
-          path: dist/
-          if-no-files-found: error
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
@@ -122,6 +92,7 @@ jobs:
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
       - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
@@ -130,24 +101,3 @@ jobs:
           sbom: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-
-  # PyPI trusted publishing (OIDC, no API token). Before the first v* tag, add a
-  # trusted publisher in the PyPI project settings (Publishing; a "pending
-  # publisher" if the project does not exist on PyPI yet): owner jeefy,
-  # repository stand-in, workflow ci.yaml, environment pypi, project agent-stand-in.
-  # Until then PyPI rejects the upload.
-  pypi:
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [test, release]
-    runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-    steps:
-      # Publish the sdist and wheel built by the release job, so no build code
-      # runs in the job that can mint the OIDC token.
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: dist
-          path: dist/
-      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

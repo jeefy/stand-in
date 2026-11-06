@@ -162,10 +162,7 @@ unredacted, so switch to `failClosed` once in `enforce`.
 
 Request bodies over `STANDIN_MAX_BODY_BYTES` are not buffered: the leg switches
 to pass-through and the body goes upstream unredacted, like a non-JSON body,
-counted as `outcome="oversize"`. Bodies of `STANDIN_TOKENIZE_OFFLOAD_BYTES` or
-more are tokenized in a spawned worker process so a multi-MB scan does not stall
-other streams; each worker keeps its own scan cache, so the cache-hit metric
-counts both. Workers need a writable `/dev/shm` (the container default).
+counted as `outcome="oversize"`.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -176,9 +173,7 @@ counts both. Workers need a writable `/dev/shm` (the container default).
 | `STANDIN_METRICS_PORT` | `9102` | Prometheus `/metrics` |
 | `STANDIN_CHUNK_BYTES` | `1048576` | Max bytes per request-leg `StreamedBodyResponse` |
 | `STANDIN_MAX_BODY_BYTES` | `33554432` | Request bodies above this pass through unredacted (`oversize`); `0` = unlimited |
-| `STANDIN_CACHE_ENTRIES` | `50000` | Per-literal scan cache (per process); `0` disables |
-| `STANDIN_TOKENIZE_WORKERS` | `1` | Worker processes for large bodies; `0` tokenizes on the event loop |
-| `STANDIN_TOKENIZE_OFFLOAD_BYTES` | `262144` | Bodies at least this big go to a worker |
+| `STANDIN_CACHE_ENTRIES` | `50000` | Per-literal scan cache; `0` disables |
 | `STANDIN_MAX_CONCURRENT_STREAMS` | `0` | Cap on concurrent gRPC calls, health checks included; over it calls fail before any body (`failureMode` applies); `0` = unlimited |
 | `STANDIN_DRAIN_SECONDS` | `10` | After SIGTERM: health `NOT_SERVING` while still serving |
 | `STANDIN_SHUTDOWN_GRACE` | `600` | Then seconds in-flight streams get to finish |
@@ -194,10 +189,10 @@ counts both. Workers need a writable `/dev/shm` (the container default).
 | `standin_new_matches_total` | `tier`, `pattern_index` | Tier A-D matches in the newest turn (`STANDIN_COUNT_NEW`) |
 | `standin_turn_scope_total` | `scope` | What the newest-turn count scanned: `tail`, `first`, `input_only`, `none` (not JSON) |
 | `standin_restored_total` | | Placeholders restored in responses |
-| `standin_errors_total` | `phase` | Exceptions handled by pass-through; `response_encoded` = compressed response skipped; `tokenize_pool` = worker pool broke, inline from then on; `response_abandon` = restorer gave up, chunk passed through |
+| `standin_errors_total` | `phase` | Exceptions handled by pass-through; `response_encoded` = compressed response skipped; `response_abandon` = restorer gave up, chunk passed through |
 | `standin_held_bytes` | | Histogram of bytes held by the restorer per chunk; JSON responses are held whole, so their sizes land in the top buckets |
 | `standin_body_bytes` | | Histogram of request body size |
-| `standin_tokenize_seconds` | | Histogram of tokenize time per body, worker queueing included |
+| `standin_tokenize_seconds` | | Histogram of tokenize time per body |
 | `standin_cache_hits_total` | | String literals served from the scan cache |
 | `standin_active_streams` | | ext_proc streams currently open |
 

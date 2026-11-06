@@ -1,0 +1,149 @@
+# Credential patterns: Tier A / Tier B are tokenized by stand-in, Tier C / Tier
+# D are only counted.
+#
+# Tier A: vendor-prefixed tokens (unique prefixes, near-zero false positives).
+# Tier B: key material (PEM private keys, base64 key blocks, kubeconfig and
+# Secret data fields, service-account JSON). The `pattern` lists mirror, in
+# content and order, the first two `- regex:` guardrail blocks of the
+# agentgateway audit config, so a gateway audit and this processor can be
+# compared rule-for-rule. Rule indices are metric labels: append new rules at
+# the end of a tier (and at the same position in the gateway block), never
+# reorder or delete. Patterns stay in the Rust `regex` subset (no lookaround,
+# no backreferences).
+#
+# Tier C (contextual key=value, Authorization headers, DSNs with a password)
+# and Tier D (generic password=) are too noisy to rewrite silently: they are
+# never tokenized, only counted in the newest turn of each request
+# (STANDIN_COUNT_NEW). Rule i of tier_c is the gateway's Tier C block Ci (one
+# rule per block, in the same order) and tier_d is its last block, so the
+# indices line up with the gateway audit too. No `handling` for C/D.
+#
+# `handling` (stand-in only; not part of the gateway pattern syntax):
+#   (absent)         replace the whole match
+#   value_only       key=value style rule: replace only the value, so the
+#                    model still sees which field held a secret. The value is
+#                    the `(?P<value>...)` group when the pattern has one (use
+#                    it when the key itself contains `:` or `=`), else what
+#                    follows the first `:`/`=` (minus quotes/blanks)
+#   pem_span         extend the BEGIN header through its END footer (or, when
+#                    the footer is missing, through the following base64
+#                    lines) so the whole key is one placeholder
+#   data_block_line  never standalone: only lines inside a PEM span or
+#                    directly below a `data:` / `*-data:` / `binaryData:` key
+#                    (or below an accepted line of the same block)
+#
+# `reject` (stand-in only): list of regexes fullmatched against the value that
+# would be replaced (after value_only extraction); a hit drops the match. This
+# stands in for the negative lookahead the Rust subset lacks.
+# `key_boundary: true` (stand-in only): drop matches that start right after an
+# ASCII letter or digit (a left word boundary on the key).
+#
+# Prefilter (tokenizer-only speed-up; Python `re` would otherwise try the rule
+# at every offset of a multi-MB body): the loader derives the literal prefix(es)
+# every match starts with from the pattern itself (leading literals, escaped
+# punctuation, `(?:a|b)` groups, small character classes, optional parts; at
+# most 16 literals of 3+ characters). Rules whose pattern does not start with
+# such a prefix run unfiltered unless they set `required` / `lead` by hand:
+# every match contains one of `required` and starts at most `lead` characters
+# (default 0) before it. Explicit entries override the derived ones (`required:
+# []` disables the prefilter). For `(?i)` rules the literals are matched
+# case-insensitively. A wrong explicit entry makes the tokenizer MISS secrets
+# (tests/test_patterns.py checks every rule against plain `finditer`).
+tier_a:
+  - pattern: 'gh[pousr]_[A-Za-z0-9]{20,}'
+  - pattern: 'github_pat_[A-Za-z0-9_]{20,}'
+  - pattern: 'sk-(?:ant-(?:admin01-|api03-|oat01-)?|proj-|svcacct-|admin-|or-v1-)?[A-Za-z0-9_-]{20,}'
+  - pattern: 'AKIA[0-9A-Z]{16}'
+  - pattern: 'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}'
+  - pattern: 'xox[baprs]-[A-Za-z0-9-]{10,}'
+  - pattern: 'glpat-[A-Za-z0-9_-]{20,}'
+  - pattern: 'tskey-(?:auth|api|client|apikey)-[0-9A-Za-z_]+-[0-9A-Za-z_]+'
+  - pattern: 'AIza[0-9A-Za-z_-]{35}'
+  - pattern: 'GOCSPX-[A-Za-z0-9_-]{20,}'
+  - pattern: 'ya29\.[A-Za-z0-9_-]{30,}'
+  - pattern: '1//0[A-Za-z0-9_-]{30,}'
+  - pattern: 'gsk_[A-Za-z0-9]{40,}'
+  - pattern: '(?:hf_|api_org_)[A-Za-z0-9]{34}'
+  - pattern: 'npm_[A-Za-z0-9]{36}'
+  - pattern: 'pypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}'
+  - pattern: 'dckr_(?:pat|oat)_[A-Za-z0-9_-]{20,}'
+  - pattern: 'ATATT3[A-Za-z0-9_=-]{100,}'
+  - pattern: '[0-9]{8,10}:AA[A-Za-z0-9_-]{33}'
+    required: [':AA']
+    lead: 10
+  - pattern: 'discord(?:app)?\.com/api/webhooks/[0-9]{15,}/[A-Za-z0-9_-]{50,}'
+  - pattern: 'hooks\.slack\.com/(?:services|workflows|triggers)/[A-Za-z0-9+/]{20,}'
+  - pattern: 'cf[ua]t_[A-Za-z0-9]{40}[a-f0-9]{8}'
+  - pattern: 'AGE-SECRET-KEY-1[A-Z0-9]{50,}'
+  - pattern: '\x24argon2id\x24v=19\x24m=[0-9]+,t=[0-9]+,p=[0-9]+\x24[A-Za-z0-9+/]+\x24[A-Za-z0-9+/]+'
+  - pattern: '(?:sk|rk)_(?:live|test|prod)_[A-Za-z0-9]{16,}'
+  - pattern: 'SG\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{30,}'
+  - pattern: 'tvly-[A-Za-z0-9_-]{20,}'
+  - pattern: 'lsv2_(?:pt|sk)_[A-Za-z0-9_-]{20,}'
+  - pattern: 'BW_?(?:CLIENT)?SECRET[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9]{28,}'
+    handling: value_only
+  - pattern: 'ASIA[0-9A-Z]{16}'
+  - pattern: 'whsec_[A-Za-z0-9]{32,}'
+  - pattern: 'xapp-[0-9]-[A-Za-z0-9]+-[0-9]+-[a-f0-9]{64}'
+  - pattern: 'hv[sb]\.[A-Za-z0-9_-]{24,}'
+  - pattern: 'gl(?:rt|cbt)-[A-Za-z0-9_-]{20,}'
+  - pattern: '//registry\.npmjs\.org/:_authToken=(?P<value>[0-9a-f-]{36})'
+    handling: value_only
+  - pattern: 'dapi[a-f0-9]{32}'
+  - pattern: 'do[por]_v1_[a-f0-9]{64}'
+  - pattern: 'sbp_[a-f0-9]{40}'
+  - pattern: 'pscale_tkn_[A-Za-z0-9_.-]{32,}'
+tier_b:
+  - pattern: '-----BEGIN[ A-Z0-9_-]{0,40}PRIVATE KEY(?: BLOCK)?-----'
+    handling: pem_span
+  - pattern: '(?m)^[ \t]*[A-Za-z0-9+/]{60,}={0,2}[ \t]*$'
+    handling: data_block_line
+  - pattern: '(?i)(?:client-key-data|client-certificate-data|certificate-authority-data|token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9+/=_.-]{40,}'
+    handling: value_only
+    # git SHA-1 / SHA-256 digests and SRI hashes are not credentials
+    reject: ['[0-9a-f]{40}', '[0-9a-f]{64}', 'sha(?:256|384|512)-[A-Za-z0-9+/=]+']
+  - pattern: '\"(?:private_key_id|private_key)\"\s*:\s*\"(?:[a-f0-9]{40}|-----BEGIN)'
+    handling: value_only
+  - pattern: '\"type\"\s*:\s*\"service_account\"'
+    handling: value_only
+  # API-key request headers (curl -H, HTTP dumps, client configs). The header
+  # name is the credential signal, so unlike the `token:` rule above there is no
+  # hex reject: a 64-hex x-api-key went upstream raw on 2026-10-28.
+  - pattern: '(?i)(?:x-api-key|x-plex-token|x-nsone-key|x-gitlab-token|private-token|x-vault-token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
+    handling: value_only
+  # kubeadm bootstrap token in a kubeconfig/join config (`token: abcdef.0123456789abcdef`);
+  # too short for the 40+ `token:` rule above.
+  - pattern: '(?i)token[\"\x27 ]*:[\"\x27 ]*[a-z0-9]{6}\.[a-z0-9]{16}'
+    handling: value_only
+  # kubeconfig auth-provider (OIDC) client-secret
+  - pattern: '(?i)(?:client-secret|idp-certificate-authority-data)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
+    handling: value_only
+tier_c:
+  # C0: key/secret/token-named assignment
+  - pattern: '(?i)(?:api[_-]?key|apikey|client[_-]?secret|secret[_-]?key|access[_-]?token|auth[_-]?token|bearer[_-]?token|private[_-]?key|encryption[_-]?key|session[_-]?secret|jwt[_-]?secret|admin[_-]?token|[a-z0-9]+_token|[a-z0-9]+_secret|[a-z0-9]+_key)[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9_\-./+=]{24,}'
+    # Python `re` retries `[a-z0-9]+_token` from every offset of a long
+    # alphanumeric run (quadratic; the gateway's Rust regex is linear), so it
+    # only runs near these literals: the `_` of the generic branches, plus
+    # the named keys without `_`. A generic key name longer than `lead` is
+    # matched from `lead` characters before its `_` (same count, shorter span).
+    required: ['_token', '_secret', '_key', 'apikey', 'api-key', 'clientsecret', 'client-secret', 'secretkey', 'secret-key', 'accesstoken', 'access-token', 'authtoken', 'auth-token', 'bearertoken', 'bearer-token', 'privatekey', 'private-key', 'encryptionkey', 'encryption-key', 'sessionsecret', 'session-secret', 'jwtsecret', 'jwt-secret', 'admintoken', 'admin-token']
+    lead: 32
+  # C1: *arr/media/network service key, token or password
+  - pattern: '(?i)(?:sonarr|radarr|readarr|lidarr|prowlarr|bazarr|jellyfin|tautulli|tmdb|plex|qbit[a-z]*|nsone|ns1|unifi|adguard)[\w .-]{0,20}?(?:api[_-]?key|apikey|token|password)[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9_-]{20,}'
+  # C2: Gitea/Forgejo/Renovate 40-hex token
+  - pattern: '(?i)(?:gitea|forgejo|renovate)[\w .-]{0,20}?(?:token|key)[\"\x27 ]*[:=][\"\x27 ]*[0-9a-f]{40}'
+  # C3: API-key request headers (same pattern as tier_b rule 5)
+  - pattern: '(?i)(?:x-api-key|x-plex-token|x-nsone-key|x-gitlab-token|private-token|x-vault-token)[\"\x27 ]*:[\"\x27 ]*[A-Za-z0-9_\-./+=]{16,}'
+  # C4: raw Authorization header
+  - pattern: '(?i)authorization[\"\x27 ]*:[\"\x27 ]*(?:bearer|basic|token)\s+[A-Za-z0-9._~+/=-]{20,}'
+  # C5: URL/DSN with a literal password
+  - pattern: '(?i)(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|rediss|amqps?|mqtt|nats|ldaps?|smtps?|ftp|sftp|https?)://[^/\s:@\x24]{1,64}:[^/\s@\x24]{8,}@[A-Za-z0-9.-]'
+    required: ['://']
+    lead: 11
+  # C6: AWS-style secret access key
+  - pattern: '(?i)(?:aws)?[\w.-]{0,20}?secret[\w .-]{0,5}?(?:access)?[\w .-]{0,5}?key[\"\x27 ]*[:=][\"\x27 ]*[A-Za-z0-9/+=]{40}\b'
+    required: [secret]
+    lead: 23
+tier_d:
+  # generic password assignment
+  - pattern: '(?i)(?:password|passwd|pwd|passphrase)[\"\x27 ]*[:=][\"\x27 ]*[^\s\"\x27<>\x24`{}\\]{8,}'

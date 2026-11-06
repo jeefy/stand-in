@@ -1,10 +1,8 @@
-# Allowlist: send only what the Dockerfile copies.
 *
 !LICENSE
 !README.md
 !patterns.yaml
-!pyproject.toml
-!src/
-!uv.lock
-**/__pycache__
-**/*.py[cod]
+!go.mod
+!go.sum
+!cmd/
+!pkg/

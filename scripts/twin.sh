@@ -52,7 +52,7 @@ if [[ -z "${RUNTIME}" ]]; then
         exit 1
     fi
 fi
-for tool in "${RUNTIME}" uv curl python3; do
+for tool in "${RUNTIME}" curl python3; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
         echo "FAIL: ${tool} not found" >&2
         exit 1
@@ -333,7 +333,7 @@ start_standin() {
     local mode="$1"
     STANDIN_MODE="${mode}" STANDIN_SALT="${TWIN_SALT}" STANDIN_GRPC_PORT="${GRPC_PORT}" \
         STANDIN_METRICS_PORT="${METRICS_PORT}" STANDIN_DRAIN_SECONDS=0 STANDIN_SHUTDOWN_GRACE=1 \
-        uv run --project "${ROOT}" --quiet python -m standin \
+        "${ROOT}/bin/stand-in" \
         >"${WORK}/standin-${mode}.log" 2>&1 &
     TOK_PID=$!
     wait_port "${GRPC_PORT}" "stand-in (${mode})" "${TOK_PID}"
