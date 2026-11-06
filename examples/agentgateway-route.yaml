@@ -30,6 +30,10 @@ frontendPolicies:
       standin.distinct: 'default(extproc.standin.distinct, null)'
       standin.tier_a: 'default(extproc.standin.tier_a, null)'
       standin.tier_b: 'default(extproc.standin.tier_b, null)'
+      standin.new_a: 'default(extproc.standin.new_a, null)'
+      standin.new_b: 'default(extproc.standin.new_b, null)'
+      standin.new_c: 'default(extproc.standin.new_c, null)'
+      standin.new_d: 'default(extproc.standin.new_d, null)'
 
 gateways:
   llm:

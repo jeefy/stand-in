@@ -134,8 +134,8 @@ jobs:
   # PyPI trusted publishing (OIDC, no API token). Before the first v* tag, add a
   # trusted publisher in the PyPI project settings (Publishing; a "pending
   # publisher" if the project does not exist on PyPI yet): owner jeefy,
-  # repository stand-in, workflow ci.yaml, environment pypi. Until then PyPI
-  # rejects the upload.
+  # repository stand-in, workflow ci.yaml, environment pypi, project agent-stand-in.
+  # Until then PyPI rejects the upload.
   pypi:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [test, release]

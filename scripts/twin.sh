@@ -173,7 +173,16 @@ for port in "${GW_PORT}" "${ADMIN_PORT}" "${STATS_PORT}" "${READY_PORT}" "${GRPC
 done
 if ! "${RUNTIME}" image inspect "${IMAGE}" >/dev/null 2>&1; then
     echo "pulling ${IMAGE} with ${RUNTIME}"
-    "${RUNTIME}" pull -q "${IMAGE}" >/dev/null
+    pull_attempts=0
+    until "${RUNTIME}" pull -q "${IMAGE}" >/dev/null; do
+        pull_attempts=$((pull_attempts + 1))
+        if [[ ${pull_attempts} -ge 3 ]]; then
+            echo "FAIL: unable to pull ${IMAGE} after ${pull_attempts} attempts" >&2
+            exit 1
+        fi
+        echo "WARN: pull failed, retrying in 5s (attempt ${pull_attempts}/3)..." >&2
+        sleep 5
+    done
 fi
 
 # --- stub upstream ----------------------------------------------------------

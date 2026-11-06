@@ -4,6 +4,22 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-11-06
+
+### Added
+
+- Tier B rule 6: kubeadm bootstrap tokens in kubeconfigs/join configs
+  (`token: abcdef.0123456789abcdef`).
+- Tier B rule 7: kubeconfig auth-provider (OIDC) client secrets
+  (`client-secret` and `idp-certificate-authority-data`).
+- Renovate bot configuration with automerge enabled for non-major updates.
+
+### Changed
+
+- Renamed PyPI package to `agent-stand-in` for publication.
+- `scripts/twin.sh`: retry container image pulls up to 3 times to withstand
+  transient registry timeouts in CI.
+
 ## [0.4.1] - 2026-10-30
 
 ### Fixed
