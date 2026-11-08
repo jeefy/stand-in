@@ -15,6 +15,7 @@ import (
 	"github.com/jeefy/stand-in/pkg/restorer"
 	"github.com/jeefy/stand-in/pkg/tokenizer"
 	"github.com/jeefy/stand-in/pkg/turns"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
@@ -90,6 +91,12 @@ func newExchange(srv *Server) *exchange {
 func (s *Server) Process(stream extprocv3.ExternalProcessor_ProcessServer) error {
 	metrics.ActiveStreams.Inc()
 	defer metrics.ActiveStreams.Dec()
+
+	// Send gRPC response headers now: agentgateway times out the ext_proc call until they
+	// arrive, and with deferred request headers the first message waits for the whole body.
+	if err := stream.SendHeader(metadata.MD{}); err != nil {
+		return err
+	}
 
 	ex := newExchange(s)
 	defer func() {
