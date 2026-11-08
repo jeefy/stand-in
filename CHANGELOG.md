@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-11-08
+
+### Fixed
+
+- extproc: send empty gRPC response headers immediately on stream start to prevent agentgateway client initialization timeouts on large requests (`#12`).
+- ci/e2e: provide `uv` with `--no-project --with pyyaml` in `scripts/twin.sh` to ensure full and green E2E test runs (`#13`).
+
 ## [0.6.0] - 2026-11-06
 
 ### Changed
