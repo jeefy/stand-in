@@ -36,6 +36,7 @@ jobs:
       - uses: actions/setup-go@f111f3307d8850f501ac008e886eec1fd1932a34 # v5.3.0
         with:
           go-version: "1.24"
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - run: make build
       - name: Local twin
         run: scripts/twin.sh
@@ -64,8 +65,14 @@ jobs:
           load: true
           tags: stand-in:ci
       - name: Smoke test
+        # stand-in is a daemon without CLI flags; `--help` starts the server and
+        # blocks until the job timeout. Start it detached and check it stays up.
         run: |
-          docker run --rm stand-in:ci --help || true
+          docker run -d --name stand-in-smoke stand-in:ci
+          sleep 3
+          docker logs stand-in-smoke
+          test "$(docker inspect stand-in-smoke --format '{{.State.Running}}')" = true
+          docker stop stand-in-smoke
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

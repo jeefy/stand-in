@@ -292,7 +292,7 @@ wait_port "${STUB_PORT}" "stub upstream" "${STUB_PID}"
 # attributes, route, extProc policy, ai backend); only the listener port, the
 # extProc host and the backend address are rewritten for localhost.
 mkdir -p "${WORK}/agw"
-uv run --project "${ROOT}" --quiet python - "${ROOT}/examples/agentgateway-route.yaml" \
+uv run --no-project --quiet --with pyyaml python - "${ROOT}/examples/agentgateway-route.yaml" \
     "${WORK}/agw/config.yaml" "${ADMIN_PORT}" "${STATS_PORT}" "${READY_PORT}" "${GW_PORT}" \
     "${GRPC_PORT}" "${STUB_PORT}" <<'PY'
 import sys
