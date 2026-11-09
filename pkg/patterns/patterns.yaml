@@ -97,6 +97,19 @@ tier_a:
   - pattern: '[0-9]/[0-9]{10,20}/[0-9]{10,20}:[a-f0-9]{32}'
     required: [':']
     lead: 43
+  # ElevenLabs API key
+  - pattern: 'sk_[a-f0-9]{48}'
+  # Twilio API key SID (Account SID `AC...` is an identifier, left out on purpose)
+  - pattern: 'SK[a-f0-9]{32}'
+  # Notion integration token (new `ntn_` format)
+  - pattern: 'ntn_[A-Za-z0-9]{40,}'
+  # Grafana service-account token and Grafana Cloud token
+  - pattern: 'glsa_[A-Za-z0-9]{32}_[a-f0-9]{8}'
+  - pattern: 'glc_[A-Za-z0-9+/]{32,}={0,2}'
+  # k3s/RKE2 join token: K10<CA sha256>::<user>:<password>
+  - pattern: 'K10[a-f0-9]{64}::(?:server|node):[A-Za-z0-9._-]{16,}'
+  # Meta (Facebook/WhatsApp Cloud API) access token
+  - pattern: 'EAA[A-Za-z0-9]{100,}'
 tier_b:
   - pattern: '-----BEGIN[ A-Z0-9_-]{0,40}PRIVATE KEY(?: BLOCK)?-----'
     handling: pem_span
