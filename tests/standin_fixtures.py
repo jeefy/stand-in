@@ -89,6 +89,11 @@ POSITIVE: dict[tuple[str, int], tuple[str, str, str]] = {
     ("a", 36): ("dop_v1_" + HEX64, HEX64, "dop_v1_" + HEX40),
     ("a", 37): ("sbp_" + HEX40, HEX40, "sbp_" + HEX40[:32]),
     ("a", 38): ("pscale_tkn_" + fill(34, "FAKE_TEST."), fill(34, "FAKE_TEST."), "pscale_tkn_short"),
+    ("a", 39): (
+        "1/" + "0" * 12 + "/" + "0" * 12 + ":" + HEX40[:32],
+        HEX40[:32],
+        "1/" + "0" * 12 + "/" + "0" * 12 + ":" + HEX40[:20],
+    ),
     ("b", 0): ("key:\n" + PEM_KEY + "\nend", PEM_BODY, "-----BEGIN PUBLIC KEY-----"),
     ("b", 1): ("data:\n  " + B64_LINE + "\n", B64_LINE, "notes:\n  " + B64_LINE + "\n"),
     ("b", 2): (
