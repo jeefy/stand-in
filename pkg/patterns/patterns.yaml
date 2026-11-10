@@ -93,6 +93,10 @@ tier_a:
   - pattern: 'do[por]_v1_[a-f0-9]{64}'
   - pattern: 'sbp_[a-f0-9]{40}'
   - pattern: 'pscale_tkn_[A-Za-z0-9_.-]{32,}'
+  # Asana personal access token: <ver>/<user gid>/<token gid>:<32 hex>
+  - pattern: '[0-9]/[0-9]{10,20}/[0-9]{10,20}:[a-f0-9]{32}'
+    required: [':']
+    lead: 43
 tier_b:
   - pattern: '-----BEGIN[ A-Z0-9_-]{0,40}PRIVATE KEY(?: BLOCK)?-----'
     handling: pem_span
