@@ -94,6 +94,17 @@ POSITIVE: dict[tuple[str, int], tuple[str, str, str]] = {
         HEX40[:32],
         "1/" + "0" * 12 + "/" + "0" * 12 + ":" + HEX40[:20],
     ),
+    ("a", 40): ("sk_" + HEX64[:48], HEX64[:48], "sk_" + HEX64[:30]),
+    ("a", 41): ("SK" + HEX40[:32], HEX40[:32], "SK" + HEX40[:20]),
+    ("a", 42): ("ntn_" + fill(44), fill(44), "ntn_short"),
+    ("a", 43): ("glsa_" + fill(32) + "_" + HEX40[:8], fill(32) + "_" + HEX40[:8], "glsa_short"),
+    ("a", 44): ("glc_" + fill(40), fill(40), "glc_short"),
+    ("a", 45): (
+        "K10" + HEX64 + "::server:" + fill(24),
+        fill(24),
+        "K10" + HEX64 + "::agent:" + fill(24),
+    ),
+    ("a", 46): ("EAA" + fill(110), fill(110), "EAA" + fill(40)),
     ("b", 0): ("key:\n" + PEM_KEY + "\nend", PEM_BODY, "-----BEGIN PUBLIC KEY-----"),
     ("b", 1): ("data:\n  " + B64_LINE + "\n", B64_LINE, "notes:\n  " + B64_LINE + "\n"),
     ("b", 2): (
