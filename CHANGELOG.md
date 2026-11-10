@@ -4,6 +4,13 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-11-09
+
+### Added
+
+- Patterns: tokenize Asana personal access tokens (`<ver>/<user gid>/<token gid>:<32 hex>`) in tier A (`#14`).
+- Patterns: tokenize ElevenLabs API keys, Twilio key SIDs, Notion integration tokens (`ntn_`), Grafana service account and cloud tokens, k3s/RKE2 join tokens, and Meta/WhatsApp access tokens in tier A (`#15`).
+
 ## [0.6.1] - 2026-11-08
 
 ### Fixed
