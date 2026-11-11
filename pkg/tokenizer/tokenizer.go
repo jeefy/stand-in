@@ -173,6 +173,10 @@ func (t *Tokenizer) FindSpans(text string, rules []patterns.Rule, deadline *time
 				end = pemEnd(text, end)
 			}
 
+			if rule.Checksum != "" && !patterns.Checksums[rule.Checksum](text[start:end]) {
+				continue
+			}
+
 			if len(rule.Reject) > 0 {
 				val := text[start:end]
 				rejected := false

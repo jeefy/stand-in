@@ -7,6 +7,7 @@ from __future__ import annotations
 import random
 import re
 import string
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -27,9 +28,11 @@ from standin.patterns import (
     Rule,
     default_patterns_path,
     derive_required,
+    iban,
     load_count_rules,
     load_raw,
     load_rules,
+    luhn,
 )
 from standin.tokenizer import Tokenizer, _Folded, _rule_matches
 
@@ -81,11 +84,16 @@ def test_count_only_fixtures(rule: Rule) -> None:
     assert not list(_rule_matches(rule, neg, _Folded(neg)))
 
 
-@pytest.mark.parametrize("key", ["handling", "reject", "key_boundary"])
+@pytest.mark.parametrize("key", ["handling", "reject", "key_boundary", "checksum"])
 def test_count_only_rules_reject_tokenizer_keys(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str
 ) -> None:
-    value = {"handling": "'data_block_line'", "reject": "['x']", "key_boundary": "true"}[key]
+    value = {
+        "handling": "'data_block_line'",
+        "reject": "['x']",
+        "key_boundary": "true",
+        "checksum": "luhn",
+    }[key]
     path = _use(
         tmp_path,
         monkeypatch,
@@ -136,8 +144,9 @@ def test_derive_required(pattern: str, expected: tuple[str, ...]) -> None:
 
 def test_shipped_rules_are_prefiltered() -> None:
     unfiltered = [(r.tier, r.index) for r in RULES if not r.required]
-    # Only the base64-line rule, which never goes through _rule_matches.
-    assert unfiltered == [("b", 1)]
+    # The base64-line rule never goes through _rule_matches; the card and IBAN
+    # rules start with a character class, so there is no literal to derive.
+    assert unfiltered == [("a", 47), ("a", 48), ("b", 1)]
     by_key = {(r.tier, r.index): r for r in RULES}
     assert (by_key[("a", 18)].required, by_key[("a", 18)].lead) == ((":AA",), 10)
     assert by_key[("a", 24)].required == (
@@ -294,6 +303,7 @@ def test_explicit_required_overrides_derived(
         ("tier_a:\n  - pattern: 'x'\n    lead: -1\n", "lead"),
         ("tier_a:\n  - pattern: 'x'\n    reject: '[0-9]+'\n", "reject"),
         ("tier_a:\n  - pattern: 'x'\n    key_boundary: 'yes'\n", "key_boundary"),
+        ("tier_a:\n  - pattern: 'x'\n    checksum: crc32\n", "unknown checksum"),
     ],
 )
 def test_malformed_files_raise_value_error(
@@ -302,6 +312,31 @@ def test_malformed_files_raise_value_error(
     _use(tmp_path, monkeypatch, content)
     with pytest.raises(ValueError, match=message):
         load_rules()
+
+
+@pytest.mark.parametrize(
+    ("fn", "value", "ok"),
+    [
+        (luhn, "4111 1111 1111 1111", True),
+        (luhn, "5500-0000-0000-0004", True),
+        (luhn, "4111 1111 1111 1112", False),
+        (luhn, "", False),
+        (luhn, "4111 1111 1111 111\u0661", False),
+        (iban, "DE89 3704 0044 0532 0130 00", True),
+        (iban, "GB82WEST12345698765432", True),
+        (iban, "DE88 3704 0044 0532 0130 00", False),
+        (iban, "DE89 3704", False),
+        (iban, "de89370400440532013000", False),
+    ],
+)
+def test_checksums(fn: Callable[[str], bool], value: str, ok: bool) -> None:
+    assert fn(value) is ok
+
+
+def test_checksum_rules_sit_at_the_end_of_tier_a() -> None:
+    tier_a = [r for r in RULES if r.tier == "a"]
+    assert [(r.index, r.checksum) for r in tier_a if r.checksum] == [(47, "luhn"), (48, "iban")]
+    assert tier_a[-1].index == 48
 
 
 def test_load_raw_non_mapping(tmp_path: Path) -> None:

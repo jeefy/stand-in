@@ -4,6 +4,12 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Patterns: new stand-in-only `checksum: luhn|iban` rule modifier that drops a match unless the checksum holds; tier A gains payment card number (Luhn) and IBAN (ISO 13616 mod-97) rules (appended as `a47`, `a48`). Python and Go loaders both support it.
+
 ## [0.6.2] - 2026-11-09
 
 ### Added
