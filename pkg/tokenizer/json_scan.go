@@ -213,10 +213,23 @@ func JSONEscaped(value string) string {
 var (
 	base64Only    = regexp.MustCompile(`^[A-Za-z0-9+/=]+$`)
 	dataKeyBefore = regexp.MustCompile(`"data"\s*:\s*$`)
+	typeBase64    = regexp.MustCompile(`"type"\s*:\s*"base64"`)
+	mediaImage    = regexp.MustCompile(`"media_type"\s*:\s*"image/`)
 )
 
-// isBase64Data matches Anthropic {"type":"base64","data":"..."} payloads.
-// shortcut: key+charset+length heuristic, not a sibling "type" check; upgrade if false positives appear.
+// isBase64Data matches Anthropic image source blocks
+// {"type":"base64","media_type":"image/...","data":"..."}. The enclosing
+// object must carry both siblings, so secrets in arbitrary "data" fields
+// are still scanned.
 func isBase64Data(raw string, m []int, inner string) bool {
-	return len(inner) >= 256 && base64Only.MatchString(inner) && dataKeyBefore.MatchString(raw[:m[0]])
+	if len(inner) < 256 || !base64Only.MatchString(inner) || !dataKeyBefore.MatchString(raw[:m[0]]) {
+		return false
+	}
+	open := strings.LastIndexByte(raw[:m[0]], '{')
+	end := strings.IndexByte(raw[m[1]:], '}')
+	if open < 0 || end < 0 {
+		return false
+	}
+	obj := raw[open : m[1]+end]
+	return typeBase64.MatchString(obj) && mediaImage.MatchString(obj)
 }

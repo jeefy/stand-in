@@ -172,4 +172,18 @@ func TestSkipBase64Payloads(t *testing.T) {
 			t.Errorf("%s: ghp token not tokenized or blob altered", name)
 		}
 	}
+	// Secrets in non-image payloads must still be scanned.
+	secret := "EAA" + strings.Repeat("a1B2c3D4e5", 12)
+	for name, body := range map[string]string{
+		"data-field": `{"data":"` + strings.Repeat("QUJD", 70) + secret + `"}`,
+		"text-uri":   `{"u":"data:text/plain;base64,` + secret + `"}`,
+	} {
+		res, err := tok.TokenizeJSON([]byte(body))
+		if err != nil || res == nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(res.Text, secret) {
+			t.Errorf("%s: secret in non-image payload was skipped", name)
+		}
+	}
 }
