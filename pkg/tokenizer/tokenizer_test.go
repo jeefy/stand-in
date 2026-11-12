@@ -116,3 +116,28 @@ func TestChecksumRules(t *testing.T) {
 		}
 	}
 }
+
+func TestBase64ImageNotTokenized(t *testing.T) {
+	rules, err := patterns.LoadRules("../patterns/patterns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := NewTokenizer(rules, nil, "test-salt", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob := "iVBORw0KGgoAAAANSUhEUgAAAlEAAAGk" + strings.Repeat("CAYAAAARy3DpAA", 12) // contains EAA + 100+ alnum
+	body := `{"image_url":{"url":"data:image/png;base64,` + blob + `"}}`
+	res, err := tok.TokenizeJSON([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Text != body || len(res.Mapping) != 0 {
+		t.Fatalf("base64 image was rewritten: %d mappings", len(res.Mapping))
+	}
+	real := "EAA" + strings.Repeat("Z", 120)
+	res, _ = tok.TokenizeJSON([]byte(`{"t":"tok ` + real + `"}`))
+	if len(res.Mapping) != 1 {
+		t.Fatalf("standalone Meta token not detected")
+	}
+}
