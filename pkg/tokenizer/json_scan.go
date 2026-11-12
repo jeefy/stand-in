@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -37,6 +38,9 @@ func (t *Tokenizer) TokenizeJSON(body []byte) (*TokenizeResult, error) {
 	t.cacheMu.Lock()
 	for idx, m := range matches {
 		inner := raw[m[0]+1 : m[1]-1]
+		if isBase64Data(raw, m, inner) {
+			continue
+		}
 		if len(inner) >= CacheMinChars && t.cacheSize > 0 {
 			h, err := blake2b.New(16, t.saltKey)
 			if err == nil {
@@ -204,4 +208,15 @@ func JSONEscaped(value string) string {
 		return s[1 : len(s)-1]
 	}
 	return s
+}
+
+var (
+	base64Only    = regexp.MustCompile(`^[A-Za-z0-9+/=]+$`)
+	dataKeyBefore = regexp.MustCompile(`"data"\s*:\s*$`)
+)
+
+// isBase64Data matches Anthropic {"type":"base64","data":"..."} payloads.
+// shortcut: key+charset+length heuristic, not a sibling "type" check; upgrade if false positives appear.
+func isBase64Data(raw string, m []int, inner string) bool {
+	return len(inner) >= 256 && base64Only.MatchString(inner) && dataKeyBefore.MatchString(raw[:m[0]])
 }

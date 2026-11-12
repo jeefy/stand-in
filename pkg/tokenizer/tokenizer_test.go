@@ -141,3 +141,35 @@ func TestBase64ImageNotTokenized(t *testing.T) {
 		t.Fatalf("standalone Meta token not detected")
 	}
 }
+
+func TestSkipBase64Payloads(t *testing.T) {
+	rules, err := patterns.LoadRules("../patterns/patterns.yaml")
+	if err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+	tok, err := NewTokenizer(rules, nil, "test-salt", 100)
+	if err != nil {
+		t.Fatalf("NewTokenizer: %v", err)
+	}
+	blob := strings.Repeat("iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB", 10) + "EAA" + strings.Repeat("a1B2c3D4e5", 10) + "AKIA" + "ABCDEFGHIJKLMNOP" + strings.Repeat("QRSTuvwx", 5)
+	fake := "ghp_" + strings.Repeat("aB3dE6gH9j", 3) + "abcdef"
+	openai := `{"messages":[{"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,` + blob + `"}}]}]}`
+	anth := `{"messages":[{"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"` + blob + `"}}]}]}`
+	for name, body := range map[string]string{"openai": openai, "anthropic": anth} {
+		res, err := tok.TokenizeJSON([]byte(body))
+		if err != nil || res == nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if res.Text != body || res.Replaced != 0 {
+			t.Errorf("%s: payload modified (replaced=%d)", name, res.Replaced)
+		}
+		with := strings.Replace(body, `{"messages"`, `{"note":"tok `+fake+`","messages"`, 1)
+		res, err = tok.TokenizeJSON([]byte(with))
+		if err != nil || res == nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(res.Text, fake) || !strings.Contains(res.Text, blob) {
+			t.Errorf("%s: ghp token not tokenized or blob altered", name)
+		}
+	}
+}
