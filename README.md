@@ -79,7 +79,7 @@ metric labels; never reorder or delete):
 
 | Tier | Contents |
 | --- | --- |
-| A | 39 vendor-prefixed tokens (GitHub, OpenAI, Anthropic, AWS access keys and STS, JWT, Slack bot/user and app-level, GitLab PAT and runner/CI, Tailscale, Google, Groq, Hugging Face, npm and npm legacy `_authToken`, PyPI, Docker, Atlassian, Telegram, webhooks, Cloudflare, age, argon2id, Stripe keys and webhook secrets, SendGrid, Tavily, LangSmith, Bitwarden, HashiCorp Vault, Databricks, DigitalOcean, Supabase, PlanetScale) |
+| A | 47 vendor-prefixed tokens (GitHub, OpenAI, Anthropic, AWS access keys and STS, JWT, Slack bot/user and app-level, GitLab PAT and runner/CI, Tailscale, Google, Groq, Hugging Face, npm and npm legacy `_authToken`, PyPI, Docker, Atlassian, Telegram, webhooks, Cloudflare, age, argon2id, Stripe keys and webhook secrets, SendGrid, Tavily, LangSmith, Bitwarden, HashiCorp Vault, Databricks, DigitalOcean, Supabase, PlanetScale, Asana, ElevenLabs, Twilio, Notion, Grafana, k3s, Meta) and 2 checksum-validated rules: payment card numbers (Luhn) and IBANs (ISO 13616 mod-97) |
 | B | 6 key-material rules: PEM private keys, base64 key blocks, kubeconfig/Secret `*-data` fields, service-account JSON, API-key request headers (`x-api-key`, `x-gitlab-token`, `private-token`, ...) |
 | C | 7 contextual `key=value` rules, count-only: generic `*_key`/`*_token`/`*_secret`, homelab service keys, Gitea/Forgejo tokens, API-key headers, `Authorization` values, credentialed URLs, AWS-style secret keys |
 | D | 1 generic `password=` rule, count-only |
@@ -91,7 +91,7 @@ assistant message or Responses `reasoning`/`*_call` item; the whole body on a
 first turn; only `input` with `previous_response_id`), skipping image and
 base64 payloads. The count never changes the body, has a 2 s budget, and
 failures land in `standin_errors_total{phase="count_new"}`. C/D rules may not
-set `handling`, `reject` or `key_boundary`. Handling modifiers: `value_only` replaces
+set `handling`, `reject`, `key_boundary` or `checksum`. Handling modifiers: `value_only` replaces
 only the value, honouring a `(?P<value>...)` group when the pattern has one
 (use it when the key itself contains `:` or `=`), else what follows the first
 `:`/`=`; `pem_span` makes a `BEGIN...END PRIVATE KEY` block one placeholder;
@@ -101,7 +101,13 @@ matches: `reject` lists regexes fullmatched against the value to replace (the
 Tier B token rule rejects 40/64-hex git digests and SRI hashes, so a bare
 40-hex legacy GitHub OAuth token under a `token` key is no longer caught), and
 `key_boundary: true` drops matches starting right after an ASCII letter or
-digit. Overlaps merge.
+digit. `checksum: luhn|iban` drops a match unless its checksum holds (digits
+with single spaces/dashes ignored for Luhn; IBAN letters-as-numbers mod 97 ==
+1, spaces ignored). The card and IBAN rules in Tier A use it together with
+`key_boundary`; a 13-19 digit run only becomes a placeholder when it also
+starts with 2-6 and passes Luhn, so unix-ms timestamps and most order ids are
+left alone (about 1 in 10 random digit runs of that shape still passes Luhn).
+These two rules have no literal prefix and run unfiltered. Overlaps merge.
 
 Prefilters are derived automatically from each pattern's literal prefix
 (leading literals, escaped punctuation, alternations, small classes; at most

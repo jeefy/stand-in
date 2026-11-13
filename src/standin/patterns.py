@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -17,7 +18,7 @@ HANDLINGS: frozenset[str] = frozenset({"whole", "value_only", "pem_span", "data_
 TIERS: tuple[str, ...] = ("a", "b")
 COUNT_TIERS: tuple[str, ...] = ("a", "b", "c", "d")
 # Count-only tiers are plain finditer: none of the span modifiers apply.
-_TOKENIZE_ONLY_KEYS = ("handling", "reject", "key_boundary")
+_TOKENIZE_ONLY_KEYS = ("handling", "reject", "key_boundary", "checksum")
 
 PATTERNS_ENV = "STANDIN_PATTERNS_FILE"
 
@@ -42,10 +43,37 @@ class Rule:
     reject: tuple[re.Pattern[str], ...] = ()
     # Drop matches that start right after an ASCII letter or digit.
     key_boundary: bool = False
+    # Name in CHECKSUMS; the match is dropped unless the checksum holds.
+    checksum: str | None = None
 
     @property
     def ignore_case(self) -> bool:
         return self.pattern.startswith("(?i)")
+
+
+def luhn(value: str) -> bool:
+    """Luhn check over the digits of ``value`` (spaces and dashes ignored)."""
+    digits = re.sub(r"[ -]", "", value)
+    if not digits.isascii() or not digits.isdigit():
+        return False
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        n = int(d) * (2 if i % 2 else 1)
+        total += n - 9 if n > 9 else n
+    return total % 10 == 0
+
+
+def iban(value: str) -> bool:
+    """ISO 13616: 15-34 characters (spaces ignored), country code and two check
+    digits first, and the number formed by moving those four to the end (letters
+    as 10-35) is 1 mod 97. Per-country lengths are not checked."""
+    s = value.replace(" ", "")
+    if not 15 <= len(s) <= 34 or not re.fullmatch(r"[A-Z]{2}[0-9]{2}[A-Z0-9]+", s):
+        return False
+    return int("".join(str(int(c, 36)) for c in s[4:] + s[:4])) % 97 == 1
+
+
+CHECKSUMS: dict[str, Callable[[str], bool]] = {"luhn": luhn, "iban": iban}
 
 
 def default_patterns_path() -> Path:
@@ -120,6 +148,9 @@ def _build_rule(tier: str, index: int, entry: Any) -> Rule:
     key_boundary = entry.get("key_boundary", False)
     if not isinstance(key_boundary, bool):
         raise ValueError(f"{where}: key_boundary must be a boolean")
+    checksum = entry.get("checksum")
+    if checksum is not None and checksum not in CHECKSUMS:
+        raise ValueError(f"{where}: unknown checksum {checksum!r}")
     reject = tuple(re.compile(r) for r in _str_list(entry.get("reject"), f"{where}: reject"))
     return Rule(
         tier,
@@ -131,6 +162,7 @@ def _build_rule(tier: str, index: int, entry: Any) -> Rule:
         lead,
         reject,
         key_boundary,
+        checksum,
     )
 
 

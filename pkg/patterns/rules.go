@@ -41,6 +41,7 @@ type Rule struct {
 	Lead        int
 	Reject      []*regexp.Regexp
 	KeyBoundary bool
+	Checksum    string
 }
 
 func (r *Rule) IgnoreCase() bool {
@@ -54,6 +55,7 @@ type rawRule struct {
 	Lead        *int     `yaml:"lead"`
 	Reject      []string `yaml:"reject"`
 	KeyBoundary *bool    `yaml:"key_boundary"`
+	Checksum    string   `yaml:"checksum"`
 }
 
 type rawFile struct {
@@ -182,6 +184,10 @@ func buildRule(tier string, index int, raw rawRule) (Rule, error) {
 		keyBoundary = *raw.KeyBoundary
 	}
 
+	if raw.Checksum != "" && Checksums[raw.Checksum] == nil {
+		return Rule{}, fmt.Errorf("%s: unknown checksum %q", where, raw.Checksum)
+	}
+
 	var reject []*regexp.Regexp
 	for _, rej := range raw.Reject {
 		r, err := regexp.Compile(rej)
@@ -221,5 +227,6 @@ func buildRule(tier string, index int, raw rawRule) (Rule, error) {
 		Lead:        lead,
 		Reject:      reject,
 		KeyBoundary: keyBoundary,
+		Checksum:    raw.Checksum,
 	}, nil
 }

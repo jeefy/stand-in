@@ -19,7 +19,7 @@ import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass, field
 
-from standin.patterns import COUNT_TIERS, Rule, load_count_rules, load_rules
+from standin.patterns import CHECKSUMS, COUNT_TIERS, Rule, load_count_rules, load_rules
 from standin.turns import Scope, new_turn_strings
 
 PLACEHOLDER_PREFIX = "<<secret-"
@@ -171,6 +171,8 @@ class Tokenizer:
                 elif rule.handling == "pem_span":
                     end = _pem_end(text, end)
                 if rule.reject and any(r.fullmatch(text, start, end) for r in rule.reject):
+                    continue
+                if rule.checksum and not CHECKSUMS[rule.checksum](text[start:end]):
                     continue
                 if rule.handling == "pem_span":
                     pem.append((start, end))

@@ -105,6 +105,12 @@ POSITIVE: dict[tuple[str, int], tuple[str, str, str]] = {
         "K10" + HEX64 + "::agent:" + fill(24),
     ),
     ("a", 46): ("EAA" + fill(110), fill(110), "EAA" + fill(40)),
+    ("a", 47): ("card 4111 1111 1111 1111.", "4111 1111 1111 1111", "card 4111 1111 1111 1112"),
+    ("a", 48): (
+        "iban DE89 3704 0044 0532 0130 00.",
+        "DE89 3704 0044 0532 0130 00",
+        "iban DE88 3704 0044 0532 0130 00",
+    ),
     ("b", 0): ("key:\n" + PEM_KEY + "\nend", PEM_BODY, "-----BEGIN PUBLIC KEY-----"),
     ("b", 1): ("data:\n  " + B64_LINE + "\n", B64_LINE, "notes:\n  " + B64_LINE + "\n"),
     ("b", 2): (
@@ -144,6 +150,10 @@ EXTRA_POSITIVE: list[tuple[tuple[str, int], str, str]] = [
         fill(20, "FAKE_TEST-"),
     ),
     (("b", 5), "Private-Token:" + HEX40, HEX40),
+    (("a", 47), "pan=5500000000000004", "5500000000000004"),
+    (("a", 47), "pan 5500-0000-0000-0004", "5500-0000-0000-0004"),
+    (("a", 48), "GB82 WEST 1234 5698 7654 32", "GB82 WEST 1234 5698 7654 32"),
+    (("a", 48), "DE89370400440532013000", "DE89370400440532013000"),
 ]
 # (tier, index), text that rule must leave alone.
 EXTRA_NEGATIVE: list[tuple[tuple[str, int], str]] = [
@@ -154,6 +164,15 @@ EXTRA_NEGATIVE: list[tuple[tuple[str, int], str]] = [
     (("b", 5), "x-api-key: $PATCHMON_API_KEY"),
     (("b", 5), '"x-api-key": "<your-api-key>"'),
     (("b", 5), "the x-api-key header carries the key"),
+    (("a", 47), "ts 1731340800001"),  # unix ms: passes Luhn, but starts with 1
+    (("a", 47), "order 2731340800002"),  # long id, fails Luhn
+    (("a", 47), "order 4111 1111 1111 1112 3"),
+    (("a", 47), "4111111111111111111111"),  # 22-digit run
+    (("a", 47), "id a4111111111111111"),  # glued to a letter (hex)
+    (("a", 47), "4111111111111111x"),
+    (("a", 48), "GB82 WEST 1234 5698 7654 33"),  # wrong check digit
+    (("a", 48), "xDE89370400440532013000"),
+    (("a", 48), "de89370400440532013000"),
 ]
 
 # Count-only rules (Tier C/D, never tokenized): (tier, index) -> (text with one

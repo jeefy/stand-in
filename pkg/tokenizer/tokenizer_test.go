@@ -93,3 +93,26 @@ func TestPartialHoldPoint(t *testing.T) {
 		}
 	}
 }
+
+func TestChecksumRules(t *testing.T) {
+	rules, err := patterns.LoadRules("../patterns/patterns.yaml")
+	if err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+	tok, err := NewTokenizer(rules, nil, "test-salt", 0)
+	if err != nil {
+		t.Fatalf("NewTokenizer: %v", err)
+	}
+	for _, s := range []string{"4111 1111 1111 1111", "DE89 3704 0044 0532 0130 00"} {
+		res, err := tok.TokenizeText("pay " + s + " now")
+		if err != nil || res.Replaced != 1 {
+			t.Errorf("%q: replaced=%d err=%v", s, res.Replaced, err)
+		}
+	}
+	for _, s := range []string{"4111 1111 1111 1112", "1731340800001", "DE88 3704 0044 0532 0130 00", "a4111111111111111"} {
+		res, err := tok.TokenizeText("pay " + s + " now")
+		if err != nil || res.Replaced != 0 {
+			t.Errorf("%q: replaced=%d err=%v", s, res.Replaced, err)
+		}
+	}
+}
