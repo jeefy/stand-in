@@ -18,7 +18,7 @@ const (
 	PlaceholderPrefix = "<<secret-"
 	PlaceholderHexLen = 12
 	PlaceholderLen    = len(PlaceholderPrefix) + PlaceholderHexLen + 2 // 23
-	MaxHold           = PlaceholderLen - 1                            // 22
+	MaxHold           = PlaceholderLen - 1                             // 22
 
 	SaltEnv              = "STANDIN_SALT"
 	DefaultSalt          = "stand-in-default-salt"
@@ -141,6 +141,8 @@ func (t *Tokenizer) Placeholder(value string) string {
 	return fmt.Sprintf("%s%s>>", PlaceholderPrefix, digest)
 }
 
+var dataURIRegex = regexp.MustCompile(`data:image/[\w.+-]+;base64,[A-Za-z0-9+/=]+`)
+
 func (t *Tokenizer) FindSpans(text string, rules []patterns.Rule, deadline *time.Time) ([]Span, error) {
 	if rules == nil {
 		rules = t.Rules
@@ -205,6 +207,25 @@ func (t *Tokenizer) FindSpans(text string, rules []patterns.Rule, deadline *time
 
 	for _, rule := range lineRules {
 		found = append(found, dataBlockLines(rule, text, folded, pem)...)
+	}
+
+	// Base64 image data-URI payloads are random-looking; rules would
+	// match by chance and corrupt them. Drop any span touching one.
+	if skip := dataURIRegex.FindAllStringIndex(text, -1); len(skip) > 0 {
+		kept := found[:0]
+		for _, sp := range found {
+			inside := false
+			for _, k := range skip {
+				if sp.Start < k[1] && sp.End > k[0] {
+					inside = true
+					break
+				}
+			}
+			if !inside {
+				kept = append(kept, sp)
+			}
+		}
+		found = kept
 	}
 
 	return mergeSpans(found), nil
