@@ -117,6 +117,7 @@ tier_a:
   - pattern: 'K10[a-f0-9]{64}::(?:server|node):[A-Za-z0-9._-]{16,}'
   # Meta (Facebook/WhatsApp Cloud API) access token
   - pattern: 'EAA[A-Za-z0-9]{100,}'
+    key_boundary: true
   # Payment card number (13-19 digits, single spaces/dashes between digits),
   # Luhn-checked. The leading 2-6 covers every major network and leaves out
   # 13-digit unix-ms timestamps (1...); \b stops it inside longer digit runs
