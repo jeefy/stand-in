@@ -1,6 +1,7 @@
 package turns
 
 import (
+	"sort"
 	"strings"
 )
 
@@ -55,8 +56,20 @@ func ExtractStrings(value any) []string {
 			out = append(out, v)
 		case map[string]any:
 			base64Source := v["type"] == "base64"
+			keys := make([]string, 0, len(v))
+			for k := range v {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				// "role" first so a message reads role, then content.
+				if (keys[i] == "role") != (keys[j] == "role") {
+					return keys[i] == "role"
+				}
+				return keys[i] < keys[j]
+			})
 			var children []any
-			for k, val := range v {
+			for _, k := range keys {
+				val := v[k]
 				if skipKeys[k] {
 					continue
 				}
