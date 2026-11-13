@@ -6,9 +6,17 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.3] - 2026-11-13
+
 ### Added
 
-- Patterns: new stand-in-only `checksum: luhn|iban` rule modifier that drops a match unless the checksum holds; tier A gains payment card number (Luhn) and IBAN (ISO 13616 mod-97) rules (appended as `a47`, `a48`). Python and Go loaders both support it.
+- Patterns: new stand-in-only `checksum: luhn|iban` rule modifier that drops a match unless the checksum holds; tier A gains payment card number (Luhn) and IBAN (ISO 13616 mod-97) rules (appended as `a47`, `a48`). Python and Go loaders both support it (`#16`).
+- Tokenizer: skip base64 image payloads so they are neither scanned nor rewritten: `data:image/*;base64,` data URIs and Anthropic `image` source blocks (`#23`).
+
+### Fixed
+
+- Patterns: the Meta/WhatsApp `EAA` token rule now sets `key_boundary`, so base64 image data containing `EAA` is no longer rewritten (`#22`).
+- Turns: `ExtractStrings` visits object keys in a deterministic order (flaky test) (`#19`).
 
 ## [0.6.2] - 2026-11-09
 
