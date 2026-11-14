@@ -32,11 +32,16 @@ var validHandlings = map[Handling]bool{
 }
 
 type Rule struct {
-	Tier        string
-	Index       int
-	Pattern     string
-	Handling    Handling
-	Regex       *regexp.Regexp
+	Tier     string
+	Index    int
+	Pattern  string
+	Handling Handling
+	Regex    *regexp.Regexp
+	// Anchored matches Regex only at the start of the input (\A). The
+	// prefilter and data-block scanners probe single offsets; running the
+	// unanchored Regex there scans the whole remaining text on every miss,
+	// which is quadratic on large bodies.
+	Anchored    *regexp.Regexp
 	Required    []string
 	Lead        int
 	Reject      []*regexp.Regexp
@@ -171,6 +176,11 @@ func buildRule(tier string, index int, raw rawRule) (Rule, error) {
 		return Rule{}, fmt.Errorf("%s: compile regex: %w", where, err)
 	}
 
+	anchored, err := regexp.Compile(`\A(?:` + raw.Pattern + `)`)
+	if err != nil {
+		return Rule{}, fmt.Errorf("%s: compile anchored regex: %w", where, err)
+	}
+
 	lead := 0
 	if raw.Lead != nil {
 		if *raw.Lead < 0 {
@@ -223,6 +233,7 @@ func buildRule(tier string, index int, raw rawRule) (Rule, error) {
 		Pattern:     raw.Pattern,
 		Handling:    handling,
 		Regex:       re,
+		Anchored:    anchored,
 		Required:    required,
 		Lead:        lead,
 		Reject:      reject,

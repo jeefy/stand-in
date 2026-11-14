@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jeefy/stand-in/pkg/patterns"
 )
@@ -185,5 +186,65 @@ func TestSkipBase64Payloads(t *testing.T) {
 		if strings.Contains(res.Text, secret) {
 			t.Errorf("%s: secret in non-image payload was skipped", name)
 		}
+	}
+}
+
+// colonHeavyJSON builds a synthetic ~n-byte body: many short "key: value"
+// strings (every ':' is a prefilter hit for the Asana rule, whose required
+// literal is ':' with lead 43) and no actual match.
+func colonHeavyJSON(n int) []byte {
+	var sb strings.Builder
+	sb.WriteString(`{"messages":[{"role":"tool","content":"`)
+	for sb.Len() < n {
+		sb.WriteString(`metric_total{pod=\"a\"}: 12345 node:cpu:rate 0/1234567890 `)
+	}
+	sb.WriteString(`"}]}`)
+	return []byte(sb.String())
+}
+
+// Regression: ruleMatches used to probe each prefilter offset with the
+// unanchored regex, which scans the rest of the text on every miss
+// (quadratic: ~100 s for a 200 KB body in production).
+func TestTokenizeJSONLargeBodyIsLinear(t *testing.T) {
+	rules, err := patterns.LoadRules("../patterns/patterns.yaml")
+	if err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+	tok, err := NewTokenizer(rules, nil, "salt", 0)
+	if err != nil {
+		t.Fatalf("NewTokenizer: %v", err)
+	}
+	body := colonHeavyJSON(20_000)
+	start := time.Now()
+	res, err := tok.TokenizeJSON(body)
+	elapsed := time.Since(start)
+	if err != nil || res == nil {
+		t.Fatalf("TokenizeJSON: res=%v err=%v", res, err)
+	}
+	if res.Replaced != 0 {
+		t.Fatalf("expected no replacements, got %d", res.Replaced)
+	}
+	if elapsed > 2*time.Second {
+		t.Fatalf("tokenizing %d bytes took %s; prefilter probing is not linear", len(body), elapsed)
+	}
+}
+
+// Anchoring the probe must not change what the lead window finds.
+func TestTokenizeLeadWindowStillMatches(t *testing.T) {
+	rules, err := patterns.LoadRules("../patterns/patterns.yaml")
+	if err != nil {
+		t.Fatalf("LoadRules: %v", err)
+	}
+	tok, err := NewTokenizer(rules, nil, "salt", 0)
+	if err != nil {
+		t.Fatalf("NewTokenizer: %v", err)
+	}
+	secret := "1/1234567890123/1234567890123:0123456789abcdef0123456789abcdef"
+	res, err := tok.TokenizeText("asana " + secret + " end")
+	if err != nil {
+		t.Fatalf("TokenizeText: %v", err)
+	}
+	if res.Replaced != 1 || strings.Contains(res.Text, secret) {
+		t.Fatalf("asana token not tokenized: %q", res.Text)
 	}
 }

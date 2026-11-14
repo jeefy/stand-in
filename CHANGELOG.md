@@ -6,6 +6,12 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.6.4] - 2026-11-13
+
+### Fixed
+
+- Tokenizer (Go): the prefilter probe and the `data_block_line` scan ran the unanchored rule regex at every candidate offset, so each miss scanned the rest of the body. On tool-output-heavy bodies (about 2,700 `:` for the Asana rule `a39`) a 220 KB request took 100-300 s of CPU and hit the gateway timeout; with an anchored (`\A`) probe it takes under 50 ms. Regression test added. The Python tokenizer was not affected.
+
 ## [0.6.3] - 2026-11-13
 
 ### Added
