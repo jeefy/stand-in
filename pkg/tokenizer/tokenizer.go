@@ -404,8 +404,9 @@ func ruleMatches(rule patterns.Rule, text string, folded *foldedText, deadline *
 			if start >= len(text) {
 				break
 			}
-			loc := rule.Regex.FindStringIndex(text[start:])
-			if loc != nil && loc[0] == 0 {
+			// Anchored: an unanchored search scans the whole tail per candidate (O(n^2)).
+			loc := rule.Anchored.FindStringIndex(text[start:])
+			if loc != nil {
 				mStart := start
 				mEnd := start + loc[1]
 				out = append(out, [2]int{mStart, mEnd})
@@ -461,8 +462,8 @@ func dataBlockLines(rule patterns.Rule, text string, folded *foldedText, pem [][
 
 		pos := absLineEnd + 1
 		for pos < len(text) {
-			loc := rule.Regex.FindStringIndex(text[pos:])
-			if loc == nil || loc[0] != 0 {
+			loc := rule.Anchored.FindStringIndex(text[pos:])
+			if loc == nil {
 				break
 			}
 			mEnd := pos + loc[1]

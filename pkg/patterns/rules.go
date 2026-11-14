@@ -37,6 +37,7 @@ type Rule struct {
 	Pattern     string
 	Handling    Handling
 	Regex       *regexp.Regexp
+	Anchored    *regexp.Regexp // Regex pinned to the start of its input, for positional matches
 	Required    []string
 	Lead        int
 	Reject      []*regexp.Regexp
@@ -223,6 +224,7 @@ func buildRule(tier string, index int, raw rawRule) (Rule, error) {
 		Pattern:     raw.Pattern,
 		Handling:    handling,
 		Regex:       re,
+		Anchored:    regexp.MustCompile(`^(?:` + raw.Pattern + `)`),
 		Required:    required,
 		Lead:        lead,
 		Reject:      reject,

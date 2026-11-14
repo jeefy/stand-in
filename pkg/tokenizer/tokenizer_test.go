@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jeefy/stand-in/pkg/patterns"
 )
@@ -185,5 +186,29 @@ func TestSkipBase64Payloads(t *testing.T) {
 		if strings.Contains(res.Text, secret) {
 			t.Errorf("%s: secret in non-image payload was skipped", name)
 		}
+	}
+}
+
+// Many required-literal hits with no match must stay linear (was O(n^2): 60KB log took ~60s).
+func TestManyPrefilterHitsLinear(t *testing.T) {
+	rules, err := patterns.LoadRules("../patterns/patterns.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, err := NewTokenizer(rules, nil, "test-salt", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := strings.Repeat("ts=12:34:56 level=info msg=x: y\n", 4000) + "token ghp_" + strings.Repeat("a", 36)
+	start := time.Now()
+	res, err := tok.TokenizeText(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d := time.Since(start); d > 2*time.Second {
+		t.Fatalf("scrubbing 128KB took %v", d)
+	}
+	if len(res.Mapping) != 1 {
+		t.Fatalf("expected 1 secret, got %d", len(res.Mapping))
 	}
 }
